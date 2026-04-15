@@ -1,4 +1,4 @@
-from model.MotionAGFormer import MotionAGFormer
+from model.MotionAGFormer import MotionAGFormer, MambaHead
 from torch import nn
 import torch
 
@@ -62,6 +62,17 @@ def load_model(args):
     return model
 
 
+def load_model_mamba(args):
+    model = MambaHead(
+        num_joints=args.num_joints,
+        dim_in= args.dim_out,
+        dim_hidden=args.mamba_dim_hidden,
+        d_state=args.mamba_d_state,
+        d_conv=args.mamba_d_conv,
+        expand=args.mamba_expand
+    )
+    return model
+    
 def load_pretrained_weights(model, checkpoint):
     """
     Load pretrained weights to model

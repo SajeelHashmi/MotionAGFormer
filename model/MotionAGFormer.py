@@ -284,6 +284,68 @@ class MotionAGFormer(nn.Module):
         return x
 
 
+
+
+from mamba_ssm import Mamba
+
+#TODO Seprate in its own file
+class MambaHead(nn.Module):
+    """
+    Temporal refinement head using Mamba.
+    Input:  (B, T, J, C)
+    Output: (B, T, J, C)
+    """
+
+    def __init__(self,
+                 num_joints=17,
+                 dim_in=3,
+                 dim_hidden=128,
+                 d_state=16,
+                 d_conv=4,
+                 expand=2):
+        super().__init__()
+
+        self.num_joints = num_joints
+
+        # project joints into feature space
+        self.joints_embed = nn.Linear(num_joints * dim_in, dim_hidden)
+
+        # Mamba sequence model (over time)
+        self.mamba = Mamba(
+            d_model=dim_hidden,
+            d_state=d_state,
+            d_conv=d_conv,
+            expand=expand
+        )
+
+        # project back to joint space
+        self.head = nn.Linear(dim_hidden, num_joints * dim_in)
+
+    def forward(self, x):
+        """
+        x: (B, T, 17, 3)
+        """
+
+        B, T, J, C = x.shape
+
+        # flatten joints
+        x = x.view(B, T, J * C)
+
+        # embed per frame
+        x = self.joints_embed(x)  # (B, T, D)
+
+        # temporal modeling
+        x = self.mamba(x)  # (B, T, D)
+
+        # back to pose space
+        x = self.head(x)  # (B, T, J*3)
+
+        x = x.view(B, T, J, C)
+
+        return x
+
+
+
 def _test():
     from torchprofile import profile_macs
     import warnings
@@ -326,6 +388,8 @@ def _test():
     out = model(random_x)
 
     assert out.shape == (b, t, j, 3), f"Output shape should be {b}x{t}x{j}x3 but it is {out.shape}"
+
+
 
 
 if __name__ == '__main__':
