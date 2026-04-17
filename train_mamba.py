@@ -1,4 +1,10 @@
+
 # TODO Add this to config mamba_dim_hidden,args.mamba_d_state,args.mamba_d_conv,args.mamba_expand
+# TODO Train one epoch function DONE
+# TODO complete the evaluate function DONE 
+# TODO complete the config file 
+#  test all configurations 
+#  Complete checkpoint saving function to save dict differently now DONE 
 import argparse
 import os
 
@@ -53,9 +59,12 @@ def parse_args():
     return opts
 
 
-def train_one_epoch(args, model_agformer, model_mamba_head, train_loader, optimizer, device, losses):
+def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_head: torch.nn.Module, gate: torch.nn.Module, train_loader:DataLoader, optimizer: torch.optim.Optimizer, device: torch.device, losses: dict):
+
+    # Putting all three models in Train
+    model_agformer.train()
     model_mamba_head.train()
-    mamba_window = args.mamba_window # defines the temporal window for Mamba Head, If motionAgformer Outputs sequences we donot need this but if it outputs single frames then we can use this to create a temporal window for mamba head to predict the residuals in that window
+    gate.train()
 
 
     for x, y in tqdm(train_loader):
@@ -68,27 +77,24 @@ def train_one_epoch(args, model_agformer, model_mamba_head, train_loader, optimi
             else:
                 y[..., 2] = y[..., 2] - y[:, 0:1, 0:1, 2]  # Place the depth of first frame root to be 0
 
-        pred_ag = model_agformer(x)  # (N, T, 17, 3)
-        if DEBUG:
-            print(f"Shape of Y is {y.shape}") 
-            print(f"Shape of pred_ag is {pred_ag.shape}")
+        # Get initial Predictions from AGFormer
+        pred = model_agformer(x)  # (N, T, 17, 3)
 
+        if args.mamba_input == "pred":
+            mamba_in = pred.detach()
+        elif args.mamba_input == "both":
+            mamba_in = torch.cat([pred.detach(), x], dim=-1)
+        elif args.mamba_input == "raw":
+            mamba_in = x
+        else:
+            print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
+            exit()
+        mamba_out = model_mamba_head(mamba_in) # (N, T, 17, 3)
 
-
-        # calculate residuals assuming that the residuals are a sequence in this case if it is otherwise we would start gathering them instead
-        residuals = y - pred_ag 
-
-        # forward pass through mamba head to predict the residuals
-        pred_residuals = model_mamba_head(pred_ag) # (N, T, 17, 3) or (N, mamba_window, 17, 3) depending on the design choice
-        if DEBUG:
-            print(f"Shape of residuals is {residuals.shape}") 
-            print(f"Shape of pred_residuals is {pred_residuals.shape}")
-        # adding the predicted residuals to the original predictions to get the final predictions
-        pred = pred_ag + pred_residuals
-        if DEBUG:
-            print(f"Shape of pred is {pred.shape}")
-
-        optimizer.zero_grad()
+        gate_val = gate(pred.detach()) 
+        mamba_res = mamba_out * gate_val
+        pred_final = pred.detach() + mamba_res
+        
 
         loss_3d_pos = loss_mpjpe(pred, y)
         loss_3d_scale = n_mpjpe(pred, y)
@@ -98,13 +104,36 @@ def train_one_epoch(args, model_agformer, model_mamba_head, train_loader, optimi
         loss_a = loss_angle(pred, y)
         loss_av = loss_angle_velocity(pred, y)
 
-        loss_total = loss_3d_pos + \
+        loss_total_agformer = loss_3d_pos + \
                     args.lambda_scale * loss_3d_scale + \
                     args.lambda_3d_velocity * loss_3d_velocity + \
                     args.lambda_lv * loss_lv + \
                     args.lambda_lg * loss_lg + \
                     args.lambda_a * loss_a + \
                     args.lambda_av * loss_av
+
+
+        # residual_gt = (y - pred).detach()
+
+        loss_3d_pos_mamba = loss_mpjpe(pred_final, y)
+        loss_3d_scale_mamba = n_mpjpe(pred_final, y)
+        loss_3d_velocity_mamba = loss_velocity(pred_final, y)
+        loss_lv_mamba = loss_limb_var(pred_final)
+        loss_lg_mamba = loss_limb_gt(pred_final, y)
+        loss_a_mamba = loss_angle(pred_final, y)
+        loss_av_mamba = loss_angle_velocity(pred_final, y)
+
+        loss_total_mamba = loss_3d_pos_mamba + \
+                    args.lambda_scale * loss_3d_scale_mamba + \
+                    args.lambda_3d_velocity * loss_3d_velocity_mamba + \
+                    args.lambda_lv * loss_lv_mamba + \
+                    args.lambda_lg * loss_lg_mamba + \
+                    args.lambda_a * loss_a_mamba + \
+                    args.lambda_av * loss_av_mamba
+
+        optimizer.zero_grad()
+
+        loss_total = loss_total_agformer + loss_total_mamba
 
         losses['3d_pose'].update(loss_3d_pos.item(), batch_size)
         losses['3d_scale'].update(loss_3d_scale.item(), batch_size)
@@ -114,14 +143,29 @@ def train_one_epoch(args, model_agformer, model_mamba_head, train_loader, optimi
         losses['angle'].update(loss_a.item(), batch_size)
         losses['angle_velocity'].update(loss_av.item(), batch_size)
         losses['total'].update(loss_total.item(), batch_size)
+        
+        losses['3d_pose_mamba'].update(loss_3d_pos_mamba.item(), batch_size)
+        losses['3d_scale_mamba'].update(loss_3d_scale_mamba.item(), batch_size)
+        losses['3d_velocity_mamba'].update(loss_3d_velocity_mamba.item(), batch_size)
+        losses['lv_mamba'].update(loss_lv_mamba.item(), batch_size)
+        losses['lg_mamba'].update(loss_lg_mamba.item(), batch_size)
+        losses['angle_mamba'].update(loss_a_mamba.item(), batch_size)
+        losses['angle_velocity_mamba'].update(loss_av_mamba.item(), batch_size)
+        losses['total_mamba'].update(loss_total_mamba.item(), batch_size)
+        
 
         loss_total.backward()
         optimizer.step()
 
-def evaluate(args, model_agformer,model_mamba_head, test_loader, datareader, device):
+
+
+
+def evaluate(args, model_agformer,model_mamba_head,gate, test_loader, datareader, device):
     print("[INFO] Evaluation")
     results_all = []
     model_mamba_head.eval()
+    model_agformer.eval()
+    gate.eval()
     with torch.no_grad():
         for x, y in tqdm(test_loader):
             x, y = x.to(device), y.to(device)
@@ -129,19 +173,55 @@ def evaluate(args, model_agformer,model_mamba_head, test_loader, datareader, dev
             if args.flip:
                 batch_input_flip = flip_data(x)
                 predicted_3d_pos_1_agformer = model_agformer(x)  # prediction of AGFORMER on original input
+                if args.mamba_input == "pred":
+                    mamba_in_1 = predicted_3d_pos_1_agformer.detach()
+                elif args.mamba_input == "both":
+                    mamba_in_1 = torch.cat([predicted_3d_pos_1_agformer.detach(), x], dim=-1)
+                elif args.mamba_input == "raw":
+                    mamba_in_1 = x
+                else:
+                    print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
+                    exit()
+                residuals_1 = model_mamba_head(mamba_in_1)
+                gate_val_1 = gate(predicted_3d_pos_1_agformer.detach())
+                mamba_res_1 = residuals_1 * gate_val_1
+            
+                predicted_3d_pos_1= predicted_3d_pos_1_agformer + mamba_res_1
+
                 predicted_3d_pos_flip_agformer = model_agformer(batch_input_flip) # Prediction of AGFORMER on flipped input
-                predicted_3d_pos_2_agformer = flip_data(predicted_3d_pos_flip_agformer)  # Flip back
-                predicted_3d_pos_agformer = (predicted_3d_pos_1_agformer + predicted_3d_pos_2_agformer) / 2 # Average Prediction of AGFORMER on original and flipped input
+                if args.mamba_input == "pred":
+                    mamba_in_flip = predicted_3d_pos_flip_agformer.detach()
+                elif args.mamba_input == "both":
+                    mamba_in_flip = torch.cat([predicted_3d_pos_flip_agformer.detach(), batch_input_flip], dim=-1)
+                elif args.mamba_input == "raw":
+                    mamba_in_flip = batch_input_flip
+                else:
+                    print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
+                    exit()
 
+                residuals_flip = model_mamba_head(mamba_in_flip)
+                gate_val_flip = gate(predicted_3d_pos_flip_agformer.detach())
+                mamba_res_flip = residuals_flip * gate_val_flip
+                predicted_3d_pos_flip = predicted_3d_pos_flip_agformer + mamba_res_flip
 
-                # now apply mamba head on top of predictions to get the final predictions on Average of AGFORMER predictions on original and flipped input
-                residuals = model_mamba_head(predicted_3d_pos_agformer)
-                predicted_3d_pos = predicted_3d_pos_agformer + residuals
+                predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_flip) / 2 # Average Prediction of AGFORMER on original and flipped input
 
             else:
                 predicted_3d_pos_agformer = model_agformer(x)
-                residuals = model_mamba_head(predicted_3d_pos_agformer)
-                predicted_3d_pos = predicted_3d_pos_agformer + residuals
+                if args.mamba_input == "pred":
+                    mamba_in = predicted_3d_pos_agformer
+                elif args.mamba_input == "both":
+                    mamba_in = torch.cat([predicted_3d_pos_agformer, x], dim=-1)
+                elif args.mamba_input == "raw":
+                    mamba_in = x
+                else:
+                    print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
+                    exit()
+                residuals = model_mamba_head(mamba_in)
+                gate_val = gate(predicted_3d_pos_agformer)
+                mamba_res = residuals * gate_val
+                predicted_3d_pos = predicted_3d_pos_agformer + mamba_res
+
                 
             if args.root_rel:
                 predicted_3d_pos[:, :, 0, :] = 0  # [N,T,17,3]
@@ -258,21 +338,24 @@ def evaluate(args, model_agformer,model_mamba_head, test_loader, datareader, dev
     return e1, e2, joint_errors, acceleration_error
 
 
-def save_checkpoint(checkpoint_path, epoch, lr, optimizer, model, min_mpjpe, wandb_id):
+def save_checkpoint(checkpoint_path, epoch, lr, optimizer, model_agformer, model_mamba_head, gate, min_mpjpe, wandb_id):
     torch.save({
         'epoch': epoch + 1,
         'lr': lr,
         'optimizer': optimizer.state_dict(),
-        'model': model.state_dict(),
+        'model_agformer': model_agformer.state_dict(),
+        'model_mamba_head': model_mamba_head.state_dict(),
+        'gate': gate.state_dict(),
         'min_mpjpe': min_mpjpe,
         'wandb_id': wandb_id,
     }, checkpoint_path)
 
 
-def train(args, opts):
-    print_args(args)
-    create_directory_if_not_exists(opts.new_checkpoint)
 
+from typing import Tuple
+from easydict import EasyDict 
+from argparse import Namespace
+def load_datasets_and_dataloaders(args:EasyDict, opts:Namespace) -> Tuple[DataLoader, DataLoader, DataReaderH36M]:
     train_dataset = MotionDataset3D(args, args.subset_list, 'train')
     test_dataset = MotionDataset3D(args, args.subset_list, 'test')
 
@@ -290,60 +373,106 @@ def train(args, opts):
                                 data_stride_train=args.n_frames // 3, data_stride_test=args.n_frames,
                                 dt_root='data/motion3d', dt_file=args.dt_file)  # Used for H36m evaluation
 
+    return train_loader, test_loader, datareader
+
+def train(args, opts):
+    print_args(args)
+    create_directory_if_not_exists(opts.new_checkpoint)
+    train_loader, test_loader, datareader = load_datasets_and_dataloaders(args, opts)
+        
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
     model_agformer = load_model(args)
-    
-    model_mamba_head = load_model_mamba(args)
+    model_mamba_head, gate = load_model_mamba(args) #TODO Return 2 models from this function a MLP Gate, and A mamba head
+
 
     if torch.cuda.is_available():
         model_agformer = torch.nn.DataParallel(model_agformer)
         model_mamba_head = torch.nn.DataParallel(model_mamba_head)
+        gate = torch.nn.DataParallel(gate)
+
     model_agformer.to(device)
     model_mamba_head.to(device)
+    gate.to(device)
 
     n_params = count_param_numbers(model_agformer)
     print(f"[INFO] Number of parameters: {n_params:,}")
     params_mamba = count_param_numbers(model_mamba_head)
     print(f"[INFO] Number of parameters in Mamba head: {params_mamba:,}")
+    params_gate = count_param_numbers(gate)
+    print(f"[INFO] Number of parameters in MLP gate: {params_gate:,}")
+
+
+    # TODO Define these params in config
+    lr_motion_former = args.learning_rate_motion_former 
+    lr_mamba = args.learning_rate_mamba
+    lr_gate = args.learning_rate_gate
     
 
-    lr = args.learning_rate # now learning rate read from config is for mamba
-    optimizer = optim.AdamW(filter(lambda p: p.requires_grad, model_mamba_head.parameters()),
-                            lr=lr,
-                            weight_decay=args.weight_decay)
-    lr_decay = args.lr_decay
+    # TODO Define these params in config
+    lr_decay = args.lr_decay_agformer
+    lr_decay_mamba = args.lr_decay_mamba
+    lr_decay_gate = args.lr_decay_gate
+
+    # TODO Define these params in config
+    weight_decay_motion_former = args.weight_decay
+    weight_decay_mamba = args.weight_decay_mamba
+    weight_decay_gate = args.weight_decay_gate
+
+
+    optimizer = torch.optim.AdamW([
+    {
+        "params": filter(lambda p: p.requires_grad, model_agformer.parameters()),
+        "lr": args.lr_agformer,
+        "weight_decay": args.wd_agformer
+    },
+    {
+        "params": filter(lambda p: p.requires_grad, model_mamba_head.parameters()),
+        "lr": args.lr_mamba,
+        "weight_decay": args.wd_mamba
+    },
+    {
+        "params": filter(lambda p: p.requires_grad, gate.parameters()),
+        "lr": args.lr_gate,
+        "weight_decay": args.wd_gate
+    },
+])
+    
+
     epoch_start = 0
     min_mpjpe = float('inf')  # Used for storing the best model
     wandb_id = opts.wandb_run_id if opts.wandb_run_id is not None else wandb.util.generate_id()
 
     if opts.checkpoint:
-        checkpoint_path = os.path.join(opts.checkpoint, opts.checkpoint_file if opts.checkpoint_file else "latest_epoch.pth.tr")
+        checkpoint_path = os.path.join(opts.checkpoint, opts.checkpoint_dir if opts.checkpoint_dir else "latest_epoch.pth.tr")
         if os.path.exists(checkpoint_path):
             checkpoint = torch.load(checkpoint_path, map_location=lambda storage, loc: storage)
-            model_agformer.load_state_dict(checkpoint['model'], strict=True)
-            # Removing the resume flag for motion AGformer as we will always load the pretrained weights and resume only the mamba head training
-            # if opts.resume:
-            #     lr = checkpoint['lr']
-            #     epoch_start = checkpoint['epoch']
-            #     optimizer.load_state_dict(checkpoint['optimizer'])
-            #     min_mpjpe = checkpoint['min_mpjpe']
-            #     if 'wandb_id' in checkpoint and opts.wandb_run_id is None:
-            #         wandb_id = checkpoint['wandb_id']
+
+            model_agformer.load_state_dict(checkpoint['model_agformer'], strict=True)
+            model_mamba_head.load_state_dict(checkpoint['model_mamba_head'], strict=True)
+            gate.load_state_dict(checkpoint['gate'], strict=True)
+
+            print(f"[INFO] Loaded checkpoint from {checkpoint_path}")
+            
+            if opts.resume:
+                lr = checkpoint['lr']
+                epoch_start = checkpoint['epoch']
+                optimizer.load_state_dict(checkpoint['optimizer'])
+                min_mpjpe = checkpoint['min_mpjpe']
+                if 'wandb_id' in checkpoint and opts.wandb_run_id is None:
+                    wandb_id = checkpoint['wandb_id']
         else:
             print("[WARN] Checkpoint path is empty. Starting from the beginning")
             opts.resume = False
-            print("[ERROR] Exiting this version of code is for training Mamba head on top of a pretrained Motion AGFormer model, so checkpoint must be provided")
-            exit()
 
     if not opts.eval_only:
-        # Should I remove or keep this I cannot decide maybe I can comment this out for now and add it back when I want to train both models together or finetune the pretrained motion AGformer with full training of mamba head
-        # if opts.resume:
-        #     if opts.use_wandb:
-        #         wandb.init(id=wandb_id,
-        #                 project='MotionMetaFormer',
-        #                 resume="must",
-        #                 settings=wandb.Settings(start_method='fork'))
-        # else:
+        if opts.resume:
+            if opts.use_wandb:
+                wandb.init(id=wandb_id,
+                        project='MotionMetaFormer',
+                        resume="must",
+                        settings=wandb.Settings(start_method='fork'))
+        else:
             print(f"Run ID: {wandb_id}")
             if opts.use_wandb:
                 wandb.init(id=wandb_id,
@@ -355,26 +484,38 @@ def train(args, opts):
                 installed_packages = {d.project_name: d.version for d in pkg_resources.working_set}
                 wandb.config.update({'installed_packages': installed_packages})
 
+
+    
     checkpoint_path_latest = os.path.join(opts.new_checkpoint, 'latest_epoch.pth.tr')
     checkpoint_path_best = os.path.join(opts.new_checkpoint, 'best_epoch.pth.tr')
 
-    # Freezing AGformer Model
-    model_agformer.eval()
-    for p in model_agformer.parameters():
-        p.requires_grad = False
+    if args.training_mode == 'joint':
+        print('[INFO] This mode will train both models simultaneously with the same learning rate, make sure to set the learning rate in config accordingly')
+
+
+    elif args.training_mode == 'mamba_head_only':
+        print('[INFO] This mode will train only the mamba head on top of a pretrained motion AGFormer model, make sure to set the learning rate in config accordingly')
+        model_agformer.eval() # Set AGFormer to eval mode since we are not training it
+        for p in model_agformer.parameters():
+            p.requires_grad = False
+
+
+    else:
+        print(f"[ERROR] Training mode {args.training_mode} not recognized, please choose from ['joint', 'mamba_head_only']")
+        exit()
 
     for epoch in range(epoch_start, args.epochs):
         if opts.eval_only:
-            evaluate(args, model_agformer, model_mamba_head, test_loader, datareader, device) # This function now takes in 2 models instead of just one
+            evaluate(args, model_agformer, model_mamba_head,gate, test_loader, datareader, device) # This function now takes in 2 models instead of just one
             exit()
 
         print(f"[INFO] epoch {epoch}")
         loss_names = ['3d_pose', '3d_scale', '2d_proj', 'lg', 'lv', '3d_velocity', 'angle', 'angle_velocity', 'total']
         losses = {name: AverageMeter() for name in loss_names}
 
-        train_one_epoch(args, model_agformer, model_mamba_head, train_loader, optimizer, device, losses)# This function now takes in 2 models instead of just one
+        train_one_epoch(args,model_agformer, model_mamba_head,gate, train_loader, optimizer, device, losses)# This function now takes in 2 models instead of just one
 
-        mpjpe, p_mpjpe, joints_error, acceleration_error = evaluate(args, model_agformer, model_mamba_head, test_loader, datareader, device)# This function now takes in 2 models instead of just one
+        mpjpe, p_mpjpe, joints_error, acceleration_error = evaluate(args, model_agformer, model_mamba_head,gate, test_loader, datareader, device)# This function now takes in 2 models instead of just one
 
         if mpjpe < min_mpjpe:
             min_mpjpe = mpjpe
@@ -396,6 +537,19 @@ def train(args, opts):
                 'train/loss_angle': losses['angle'].avg,
                 'train/angle_velocity': losses['angle_velocity'].avg,
                 'train/total': losses['total'].avg,
+
+                'train/loss_3d_pose_with_mamba': losses['3d_pose_mamba'].avg,
+                'train/loss_3d_scale_with_mamba': losses['3d_scale_mamba'].avg,
+                'train/loss_3d_velocity_with_mamba': losses['3d_velocity_mamba'].avg,
+                'train/loss_2d_proj_with_mamba': losses['2d_proj_mamba'].avg,
+                'train/loss_lg_with_mamba': losses['lg_mamba'].avg,
+                'train/loss_lv_with_mamba': losses['lv_mamba'].avg,
+                'train/loss_angle_with_mamba': losses['angle_mamba'].avg,
+                'train/angle_velocity_with_mamba': losses['angle_velocity_mamba'].avg,
+                'train/total_with_mamba': losses['total_mamba'].avg,
+
+                
+                
                 'eval/mpjpe': mpjpe,
                 'eval/acceleration_error': acceleration_error,
                 'eval/min_mpjpe': min_mpjpe,
@@ -408,6 +562,9 @@ def train(args, opts):
                 **joint_label_errors
             }, step=epoch + 1)
 
+
+
+        # TODO This needs to change to show decay in all three learning rates
         lr = decay_lr_exponentially(lr, lr_decay, optimizer)
 
     if opts.use_wandb:
@@ -422,6 +579,8 @@ def main():
     set_random_seed(opts.seed)
     torch.backends.cudnn.benchmark = False
     args = get_config(opts.config)
+
+    
     
     train(args, opts)
 

@@ -14,3 +14,4 @@ numba
 scikit-image
 filterpy
 yacs
+mamba-ssm==2.2.2

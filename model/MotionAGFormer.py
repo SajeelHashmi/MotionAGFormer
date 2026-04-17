@@ -320,6 +320,8 @@ class MambaHead(nn.Module):
 
         # project back to joint space
         self.head = nn.Linear(dim_hidden, num_joints * dim_in)
+        nn.init.zeros_(self.head.weight)
+        nn.init.zeros_(self.head.bias)
 
     def forward(self, x):
         """
@@ -344,7 +346,27 @@ class MambaHead(nn.Module):
 
         return x
 
+class Gate(nn.Module):
+    def __init__(self, num_joints=17, dim_in=3, dim_hidden=128):
+        super().__init__()
+        self.num_joints = num_joints
 
+        self.net = nn.Sequential(
+            nn.Linear(num_joints * dim_in, dim_hidden),
+            nn.ReLU(),
+            nn.Linear(dim_hidden, num_joints * dim_in),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        B, T, J, C = x.shape
+        x = x.view(B, T, J * C)
+
+        gate = self.net(x)              # (B, T, J*3)
+        gate = gate.view(B, T, J, C)    # (B, T, J, 3)
+
+        return gate
+    
 
 def _test():
     from torchprofile import profile_macs

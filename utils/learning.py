@@ -1,4 +1,4 @@
-from model.MotionAGFormer import MotionAGFormer, MambaHead
+from model.MotionAGFormer import MotionAGFormer, MambaHead,Gate
 from torch import nn
 import torch
 
@@ -63,15 +63,29 @@ def load_model(args):
 
 
 def load_model_mamba(args):
-    model = MambaHead(
+    if args.mamba_input == "pred":
+        input_dim = args.dim_out   # 3
+    elif args.mamba_input == "raw":
+        input_dim = args.dim_in    # 3 (usually same)
+    elif args.mamba_input == "both":
+        input_dim = args.dim_out + args.dim_in   # 6
+    else:
+        raise ValueError("Invalid mamba_input")
+    model_mamba = MambaHead(
         num_joints=args.num_joints,
-        dim_in= args.dim_out,
+        dim_in= input_dim,
         dim_hidden=args.mamba_dim_hidden,
         d_state=args.mamba_d_state,
         d_conv=args.mamba_d_conv,
         expand=args.mamba_expand
     )
-    return model
+
+    mlp_gate = Gate(
+        num_joints=args.num_joints,
+        dim_in=args.dim_out,
+        dim_hidden=args.mamba_dim_hidden
+    )
+    return model_mamba, mlp_gate
     
 def load_pretrained_weights(model, checkpoint):
     """
