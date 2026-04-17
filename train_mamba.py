@@ -385,6 +385,7 @@ def train(args, opts):
     model_agformer = load_model(args)
     model_mamba_head, gate = load_model_mamba(args) #TODO Return 2 models from this function a MLP Gate, and A mamba head
 
+    lr_decay = args.lr_decay
 
     if torch.cuda.is_available():
         model_agformer = torch.nn.DataParallel(model_agformer)
