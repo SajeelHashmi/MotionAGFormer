@@ -1,7 +1,19 @@
 #Training
 learning_rate: 0.0005
+
+
+learning_rate_motion_former: 0.0005
+learning_rate_mamba: 0.0005
+learning_rate_gate: 0.0005
+
+
+
 batch_size: 16
-weight_decay: 0.01
+wd_agformer: 0.01
+wd_mamba: 0.01
+wd_gate: 0.01
+
+
 lr_decay: 0.99
 epochs: 90
 
@@ -50,3 +62,16 @@ lambda_lv: 0.0
 lambda_lg: 0.0
 lambda_a: 0.0
 lambda_av: 0.0
+
+
+mamba_dim_hidden: 128
+mamba_d_state: 16
+mamba_d_conv: 4
+mamba_expand: 2
+use_regularization: True
+
+training_mode: joint        # mamba_head_only | joint
+
+mamba_input: both            # pred | raw | both
+
+

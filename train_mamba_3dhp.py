@@ -42,27 +42,19 @@ def parse_args():
     opts = parser.parse_args()
     return opts
 
-def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_head: torch.nn.Module, gate: torch.nn.Module, train_loader:DataLoader, optimizer: torch.optim.Optimizer, device: torch.device, losses: dict):
-
-    # Putting all three models in Train
+# TODO Signature changed check all calls, and implement new model pipe
+def train_one_epoch(args, model_agformer, model_mamba_head, gate, train_loader, optimizer, losses):
     model_agformer.train()
     model_mamba_head.train()
     gate.train()
-
-
+    
     for x, y in tqdm(train_loader):
         batch_size = x.shape[0]
-        x, y = x.to(device), y.to(device)
+        if torch.cuda.is_available():
+            x, y = x.cuda(), y.cuda()
 
-        with torch.no_grad():
-            if args.root_rel:
-                y = y - y[..., 0:1, :]
-            else:
-                y[..., 2] = y[..., 2] - y[:, 0:1, 0:1, 2]  # Place the depth of first frame root to be 0
-
-        # Get initial Predictions from AGFormer
         pred = model_agformer(x)  # (N, T, 17, 3)
-
+        
         if args.mamba_input == "pred":
             mamba_in = pred.detach()
         elif args.mamba_input == "both":
@@ -72,12 +64,14 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
         else:
             print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
             exit()
-        mamba_out = model_mamba_head(mamba_in) # (N, T, 17, 3)
 
+        mamba_out = model_mamba_head(mamba_in)
         gate_val = gate(pred.detach()) 
         mamba_res = mamba_out * gate_val
+
         pred_final = pred.detach() + mamba_res
-        
+
+        optimizer.zero_grad()
 
         loss_3d_pos = loss_mpjpe(pred, y)
         loss_3d_scale = n_mpjpe(pred, y)
@@ -94,9 +88,7 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
                     args.lambda_lg * loss_lg + \
                     args.lambda_a * loss_a + \
                     args.lambda_av * loss_av
-
-
-        # residual_gt = (y - pred).detach()
+        
 
         loss_3d_pos_mamba = loss_mpjpe(pred_final, y)
         loss_3d_scale_mamba = n_mpjpe(pred_final, y)
@@ -114,10 +106,7 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
                     args.lambda_a * loss_a_mamba + \
                     args.lambda_av * loss_av_mamba
 
-        optimizer.zero_grad()
-
         loss_total = loss_total_agformer + loss_total_mamba
-
         losses['3d_pose'].update(loss_3d_pos.item(), batch_size)
         losses['3d_scale'].update(loss_3d_scale.item(), batch_size)
         losses['3d_velocity'].update(loss_3d_velocity.item(), batch_size)
@@ -125,7 +114,6 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
         losses['lg'].update(loss_lg.item(), batch_size)
         losses['angle'].update(loss_a.item(), batch_size)
         losses['angle_velocity'].update(loss_av.item(), batch_size)
-        losses['total'].update(loss_total.item(), batch_size)
         
         losses['3d_pose_mamba'].update(loss_3d_pos_mamba.item(), batch_size)
         losses['3d_scale_mamba'].update(loss_3d_scale_mamba.item(), batch_size)
@@ -135,27 +123,53 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
         losses['angle_mamba'].update(loss_a_mamba.item(), batch_size)
         losses['angle_velocity_mamba'].update(loss_av_mamba.item(), batch_size)
         losses['total_mamba'].update(loss_total_mamba.item(), batch_size)
-        
 
         loss_total.backward()
         optimizer.step()
 
 
-
-def input_augmentation(input_2D, model, joints_left, joints_right):
+def input_augmentation(input_2D, model_agformer,model_mamba_head,gate, joints_left, joints_right,mamba_input_type="pred"):
     N, _, T, J, C = input_2D.shape 
 
     input_2D_flip = input_2D[:, 1]
     input_2D_non_flip = input_2D[:, 0]
 
-    output_3D_flip = model(input_2D_flip)
+    output_3D_flip = model_agformer(input_2D_flip)
+    if mamba_input_type == "pred":
+        mamba_in_flip = output_3D_flip.detach()
+    elif mamba_input_type == "both":
+        mamba_in_flip = torch.cat([output_3D_flip.detach(), input_2D_flip], dim=-1)
+    elif mamba_input_type == "raw":
+        mamba_in_flip = input_2D_flip
+    else:
+        print(f"[ERROR] Mamba input type {mamba_input_type} not recognized, please choose from ['pred', 'both', 'raw']")
+        exit()
+    mamba_out_flip = model_mamba_head(mamba_in_flip)
+    gate_val_flip = gate(output_3D_flip.detach())
+    mamba_res_flip = mamba_out_flip * gate_val_flip
 
+    output_3D_flip = output_3D_flip.detach() + mamba_res_flip
     output_3D_flip[..., 0] *= -1
 
     output_3D_flip[:, :, joints_left + joints_right, :] = output_3D_flip[:, :, joints_right + joints_left, :]
 
-    output_3D_non_flip = model(input_2D_non_flip)
+    output_3D_non_flip = model_agformer(input_2D_non_flip)
 
+    if mamba_input_type == "pred":
+        mamba_in_non_flip = output_3D_non_flip.detach()
+    elif mamba_input_type == "both":
+        mamba_in_non_flip = torch.cat([output_3D_non_flip.detach(), input_2D_non_flip], dim=-1)
+    elif mamba_input_type == "raw":
+        mamba_in_non_flip = input_2D_non_flip
+    else:
+        print(f"[ERROR] Mamba input type {mamba_input_type} not recognized, please choose from ['pred', 'both', 'raw']")
+        exit()
+    mamba_out_non_flip = model_mamba_head(mamba_in_non_flip)
+    gate_val_non_flip = gate(output_3D_non_flip.detach())
+    mamba_res_non_flip = mamba_out_non_flip * gate_val_non_flip
+    output_3D_non_flip = output_3D_non_flip.detach() + mamba_res_non_flip
+
+    
     output_3D = (output_3D_non_flip + output_3D_flip) / 2
 
     input_2D = input_2D_non_flip
@@ -163,198 +177,74 @@ def input_augmentation(input_2D, model, joints_left, joints_right):
     return input_2D, output_3D
 
 
-
-
-def evaluate(args, model_agformer,model_mamba_head,gate, test_loader, datareader, device):
-    print("[INFO] Evaluation")
-    results_all = []
-    model_mamba_head.eval()
+#TODO Signature changed check all calls, and implement new model pipe
+def evaluate(model_agformer,model_mamba_head,gate, test_loader, n_frames):
     model_agformer.eval()
+    model_mamba_head.eval()
     gate.eval()
-    with torch.no_grad():
-        for x, y in tqdm(test_loader):
-            x, y = x.to(device), y.to(device)
+    joints_left = [5, 6, 7, 11, 12, 13]
+    joints_right = [2, 3, 4, 8, 9, 10]
 
-            if args.flip:
-                batch_input_flip = flip_data(x)
-                predicted_3d_pos_1_agformer = model_agformer(x)  # prediction of AGFORMER on original input
-                if args.mamba_input == "pred":
-                    mamba_in_1 = predicted_3d_pos_1_agformer.detach()
-                elif args.mamba_input == "both":
-                    mamba_in_1 = torch.cat([predicted_3d_pos_1_agformer.detach(), x], dim=-1)
-                elif args.mamba_input == "raw":
-                    mamba_in_1 = x
-                else:
-                    print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
-                    exit()
-                residuals_1 = model_mamba_head(mamba_in_1)
-                gate_val_1 = gate(predicted_3d_pos_1_agformer.detach())
-                mamba_res_1 = residuals_1 * gate_val_1
-            
-                predicted_3d_pos_1= predicted_3d_pos_1_agformer + mamba_res_1
+    data_inference = {}
+    error_sum_test = AccumLoss()
 
-                predicted_3d_pos_flip_agformer = model_agformer(batch_input_flip) # Prediction of AGFORMER on flipped input
-                if args.mamba_input == "pred":
-                    mamba_in_flip = predicted_3d_pos_flip_agformer.detach()
-                elif args.mamba_input == "both":
-                    mamba_in_flip = torch.cat([predicted_3d_pos_flip_agformer.detach(), batch_input_flip], dim=-1)
-                elif args.mamba_input == "raw":
-                    mamba_in_flip = batch_input_flip
-                else:
-                    print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
-                    exit()
+    for data in tqdm(test_loader, 0):
+        batch_cam, gt_3D, input_2D, seq, scale, bb_box = data
 
-                residuals_flip = model_mamba_head(mamba_in_flip)
-                gate_val_flip = gate(predicted_3d_pos_flip_agformer.detach())
-                mamba_res_flip = residuals_flip * gate_val_flip
-                predicted_3d_pos_flip = predicted_3d_pos_flip_agformer + mamba_res_flip
+        [input_2D, gt_3D, batch_cam, scale, bb_box] = get_variable('test', [input_2D, gt_3D, batch_cam, scale, bb_box])
+        N = input_2D.size(0)
 
-                predicted_3d_pos = (predicted_3d_pos_1 + predicted_3d_pos_flip) / 2 # Average Prediction of AGFORMER on original and flipped input
+        out_target = gt_3D.clone().view(N, -1, 17, 3)
+        out_target[:, :, 14] = 0
+        gt_3D = gt_3D.view(N, -1, 17, 3).type(torch.cuda.FloatTensor)
 
+        input_2D, output_3D = input_augmentation(input_2D, model_agformer,model_mamba_head,gate, joints_left, joints_right)
+
+        output_3D = output_3D * scale.unsqueeze(-1).unsqueeze(-1).unsqueeze(-1).repeat(1, output_3D.size(1), 17, 3)
+        pad = (n_frames - 1) // 2
+        pred_out = output_3D[:, pad].unsqueeze(1)
+
+        pred_out[..., 14, :] = 0
+        pred_out = denormalize(pred_out, seq)
+
+        pred_out = pred_out - pred_out[..., 14:15, :] # Root-relative prediction
+        
+        inference_out = pred_out + out_target[..., 14:15, :] # final inference (for PCK and AUC) is not root relative
+
+        out_target = out_target - out_target[..., 14:15, :] # Root-relative prediction
+
+        joint_error_test = mpjpe_cal(pred_out, out_target).item()
+
+        for seq_cnt in range(len(seq)):
+            seq_name = seq[seq_cnt]
+            if seq_name in data_inference:
+                data_inference[seq_name] = np.concatenate(
+                    (data_inference[seq_name], inference_out[seq_cnt].permute(2, 1, 0).cpu().numpy()), axis=2)
             else:
-                predicted_3d_pos_agformer = model_agformer(x)
-                if args.mamba_input == "pred":
-                    mamba_in = predicted_3d_pos_agformer
-                elif args.mamba_input == "both":
-                    mamba_in = torch.cat([predicted_3d_pos_agformer, x], dim=-1)
-                elif args.mamba_input == "raw":
-                    mamba_in = x
-                else:
-                    print(f"[ERROR] Mamba input type {args.mamba_input} not recognized, please choose from ['pred', 'both', 'raw']")
-                    exit()
-                residuals = model_mamba_head(mamba_in)
-                gate_val = gate(predicted_3d_pos_agformer)
-                mamba_res = residuals * gate_val
-                predicted_3d_pos = predicted_3d_pos_agformer + mamba_res
+                data_inference[seq_name] = inference_out[seq_cnt].permute(2, 1, 0).cpu().numpy()
+        
+        error_sum_test.update(joint_error_test * N, N)
 
-                
-            if args.root_rel:
-                predicted_3d_pos[:, :, 0, :] = 0  # [N,T,17,3]
-            else:
-                y[:, 0, 0, 2] = 0
+    for seq_name in data_inference.keys():
+        data_inference[seq_name] = data_inference[seq_name][:, :, None, :]
+    
+    print(f'Protocol #1 Error (MPJPE): {error_sum_test.avg:.2f} mm')
 
-            results_all.append(predicted_3d_pos.cpu().numpy())
-
-    results_all = np.concatenate(results_all)
-    results_all = datareader.denormalize(results_all)
-    _, split_id_test = datareader.get_split_id()
-    actions = np.array(datareader.dt_dataset['test']['action'])
-    factors = np.array(datareader.dt_dataset['test']['2.5d_factor'])
-    gts = np.array(datareader.dt_dataset['test']['joints_2.5d_image'])
-    sources = np.array(datareader.dt_dataset['test']['source'])
-
-    num_test_frames = len(actions)
-    frames = np.array(range(num_test_frames))
-    action_clips = actions[split_id_test]
-    factor_clips = factors[split_id_test]
-    source_clips = sources[split_id_test]
-    frame_clips = frames[split_id_test]
-    gt_clips = gts[split_id_test]
-    if args.add_velocity:
-        action_clips = action_clips[:, :-1]
-        factor_clips = factor_clips[:, :-1]
-        frame_clips = frame_clips[:, :-1]
-        gt_clips = gt_clips[:, :-1]
-
-    assert len(results_all) == len(action_clips)
-
-    e1_all = np.zeros(num_test_frames)
-    jpe_all = np.zeros((num_test_frames, args.num_joints))
-    e2_all = np.zeros(num_test_frames)
-    acc_err_all = np.zeros(num_test_frames - 2)
-    oc = np.zeros(num_test_frames)
-    results = {}
-    results_procrustes = {}
-    results_joints = [{} for _ in range(args.num_joints)]
-    results_accelaration = {}
-    action_names = sorted(set(datareader.dt_dataset['test']['action']))
-    for action in action_names:
-        results[action] = []
-        results_procrustes[action] = []
-        results_accelaration[action] = []
-        for joint_idx in range(args.num_joints):
-            results_joints[joint_idx][action] = []
-
-    block_list = ['s_09_act_05_subact_02',
-                  's_09_act_10_subact_02',
-                  's_09_act_13_subact_01']
-    for idx in range(len(action_clips)):
-        source = source_clips[idx][0][:-6]
-        if source in block_list:
-            continue
-        frame_list = frame_clips[idx]
-        action = action_clips[idx][0]
-        factor = factor_clips[idx][:, None, None]
-        gt = gt_clips[idx]
-        pred = results_all[idx]
-        pred *= factor
-
-        # Root-relative Errors
-        pred = pred - pred[:, 0:1, :]
-        gt = gt - gt[:, 0:1, :]
-        err1 = calculate_mpjpe(pred, gt)
-        jpe = calculate_jpe(pred, gt)
-        for joint_idx in range(args.num_joints):
-            jpe_all[frame_list, joint_idx] += jpe[:, joint_idx]
-        acc_err = calculate_acc_err(pred, gt)
-        acc_err_all[frame_list[:-2]] += acc_err
-        e1_all[frame_list] += err1
-        err2 = calculate_p_mpjpe(pred, gt)
-        e2_all[frame_list] += err2
-        oc[frame_list] += 1
-    for idx in range(num_test_frames):
-        if e1_all[idx] > 0:
-            err1 = e1_all[idx] / oc[idx]
-            err2 = e2_all[idx] / oc[idx]
-            action = actions[idx]
-            results_procrustes[action].append(err2)
-            acc_err = acc_err_all[idx] / oc[idx]
-            results[action].append(err1)
-            results_accelaration[action].append(acc_err)
-            for joint_idx in range(args.num_joints):
-                jpe = jpe_all[idx, joint_idx] / oc[idx]
-                results_joints[joint_idx][action].append(jpe)
-    final_result_procrustes = []
-    final_result_joints = [[] for _ in range(args.num_joints)]
-    final_result_acceleration = []
-    final_result = []
-
-    for action in action_names:
-        final_result.append(np.mean(results[action]))
-        final_result_procrustes.append(np.mean(results_procrustes[action]))
-        final_result_acceleration.append(np.mean(results_accelaration[action]))
-        for joint_idx in range(args.num_joints):
-            final_result_joints[joint_idx].append(np.mean(results_joints[joint_idx][action]))
-
-    joint_errors = []
-    for joint_idx in range(args.num_joints):
-        joint_errors.append(
-            np.mean(np.array(final_result_joints[joint_idx]))
-        )
-    joint_errors = np.array(joint_errors)
-    e1 = np.mean(np.array(final_result))
-    assert round(e1, 4) == round(np.mean(joint_errors), 4), f"MPJPE {e1:.4f} is not equal to mean of joint errors {np.mean(joint_errors):.4f}"
-    acceleration_error = np.mean(np.array(final_result_acceleration))
-    e2 = np.mean(np.array(final_result_procrustes))
-    print('Protocol #1 Error (MPJPE):', e1, 'mm')
-    print('Acceleration error:', acceleration_error, 'mm/s^2')
-    print('Protocol #2 Error (P-MPJPE):', e2, 'mm')
-    print('----------')
-    return e1, e2, joint_errors, acceleration_error
+    return error_sum_test.avg, data_inference
 
 
+# TODO Signature changed check all calls, and implement new model pipe
 def save_checkpoint(checkpoint_path, epoch, lr, optimizer, model_agformer, model_mamba_head, gate, min_mpjpe, wandb_id):
+    if not os.path.exists('checkpoint'):
+        os.makedirs('checkpoint')
     torch.save({
         'epoch': epoch + 1,
         'lr': lr,
         'optimizer': optimizer.state_dict(),
-        'model_agformer': model_agformer.state_dict(),
-        'model_mamba_head': model_mamba_head.state_dict(),
-        'gate': gate.state_dict(),
+        'model': model.state_dict(),
         'min_mpjpe': min_mpjpe,
         'wandb_id': wandb_id,
     }, checkpoint_path)
-
 
 def save_data_inference(path, data_inference, latest):
     if latest:
@@ -362,8 +252,6 @@ def save_data_inference(path, data_inference, latest):
     else:
         mat_path = os.path.join(path, 'inference_data_best.mat')
     scio.savemat(mat_path, data_inference)
-
-
 
 
 def train(args, opts):
@@ -405,41 +293,27 @@ def train(args, opts):
     print(f"[INFO] Number of parameters in MLP gate: {params_gate:,}")
 
 
-    # TODO Define these params in config
-    lr_motion_former = args.learning_rate_motion_former 
-    lr_mamba = args.learning_rate_mamba
-    lr_gate = args.learning_rate_gate
-    
-
-    # TODO Define these params in config
-    lr_decay = args.lr_decay_agformer
-    lr_decay_mamba = args.lr_decay_mamba
-    lr_decay_gate = args.lr_decay_gate
-
-    # TODO Define these params in config
-    weight_decay_motion_former = args.weight_decay
-    weight_decay_mamba = args.weight_decay_mamba
-    weight_decay_gate = args.weight_decay_gate
-
 
     optimizer = torch.optim.AdamW([
     {
         "params": filter(lambda p: p.requires_grad, model_agformer.parameters()),
-        "lr": args.lr_agformer,
+        "lr": args.learning_rate_motion_former,
         "weight_decay": args.wd_agformer
     },
     {
         "params": filter(lambda p: p.requires_grad, model_mamba_head.parameters()),
-        "lr": args.lr_mamba,
+        "lr": args.learning_rate_mamba,
         "weight_decay": args.wd_mamba
     },
     {
         "params": filter(lambda p: p.requires_grad, gate.parameters()),
-        "lr": args.lr_gate,
+        "lr": args.learning_rate_gate,
         "weight_decay": args.wd_gate
     },
 ])
     
+    lr_decay = args.lr_decay
+
 
     epoch_start = 0
     min_mpjpe = float('inf')  # Used for storing the best model
@@ -508,25 +382,34 @@ def train(args, opts):
 
     for epoch in range(epoch_start, args.epochs):
         if opts.eval_only:
-            evaluate(args, model_agformer, model_mamba_head,gate, test_loader, datareader, device) # This function now takes in 2 models instead of just one
-            exit()
-
+            with torch.no_grad():
+                evaluate(model_agformer, model_mamba_head, gate, test_loader, args.n_frames)
+                exit()
+            
         print(f"[INFO] epoch {epoch}")
-        loss_names = ['3d_pose', '3d_scale', '2d_proj', 'lg', 'lv', '3d_velocity', 'angle', 'angle_velocity', 'total']
+        loss_names = ['3d_pose', '3d_scale', '2d_proj', 'lg', 'lv', '3d_velocity', 'angle', 'angle_velocity', 'total',
+        "3d_pose_mamba",
+        "3d_scale_mamba",
+        "3d_velocity_mamba",
+        "lv_mamba",
+        "lg_mamba",
+        "angle_mamba",
+        "angle_velocity_mamba",
+        "total_mamba", ]
         losses = {name: AverageMeter() for name in loss_names}
-
-        train_one_epoch(args,model_agformer, model_mamba_head,gate, train_loader, optimizer, device, losses)# This function now takes in 2 models instead of just one
-
-        mpjpe, p_mpjpe, joints_error, acceleration_error = evaluate(args, model_agformer, model_mamba_head,gate, test_loader, datareader, device)# This function now takes in 2 models instead of just one
+    
+        train_one_epoch(args, model_agformer, model_mamba_head, gate, train_loader, optimizer, losses)
+        with torch.no_grad():
+            mpjpe, data_inference = evaluate(model_agformer, model_mamba_head, gate, test_loader, args.n_frames)
 
         if mpjpe < min_mpjpe:
             min_mpjpe = mpjpe
-            save_checkpoint(checkpoint_path_best, epoch, lr, optimizer, model_mamba_head, min_mpjpe, wandb_id) # This function now saves the mamba head model 
-        save_checkpoint(checkpoint_path_latest, epoch, lr, optimizer, model_mamba_head, min_mpjpe, wandb_id) # This function now saves the mamba head model 
+            save_checkpoint(checkpoint_path_best, epoch, lr, optimizer, model_agformer, model_mamba_head, gate, min_mpjpe, wandb_id)
+            save_data_inference(opts.new_checkpoint, data_inference, latest=False)
+        save_checkpoint(checkpoint_path_latest, epoch, lr, optimizer, model_agformer, model_mamba_head, gate, min_mpjpe, wandb_id)
 
-        joint_label_errors = {}
-        for joint_idx in range(args.num_joints):
-            joint_label_errors[f"eval_joints/{H36M_JOINT_TO_LABEL[joint_idx]}"] = joints_error[joint_idx]
+        save_data_inference(opts.new_checkpoint, data_inference, latest=True)
+
         if opts.use_wandb:
             wandb.log({
                 'lr': lr,
@@ -539,34 +422,10 @@ def train(args, opts):
                 'train/loss_angle': losses['angle'].avg,
                 'train/angle_velocity': losses['angle_velocity'].avg,
                 'train/total': losses['total'].avg,
-
-                'train/loss_3d_pose_with_mamba': losses['3d_pose_mamba'].avg,
-                'train/loss_3d_scale_with_mamba': losses['3d_scale_mamba'].avg,
-                'train/loss_3d_velocity_with_mamba': losses['3d_velocity_mamba'].avg,
-                'train/loss_2d_proj_with_mamba': losses['2d_proj_mamba'].avg,
-                'train/loss_lg_with_mamba': losses['lg_mamba'].avg,
-                'train/loss_lv_with_mamba': losses['lv_mamba'].avg,
-                'train/loss_angle_with_mamba': losses['angle_mamba'].avg,
-                'train/angle_velocity_with_mamba': losses['angle_velocity_mamba'].avg,
-                'train/total_with_mamba': losses['total_mamba'].avg,
-
-                
-                
                 'eval/mpjpe': mpjpe,
-                'eval/acceleration_error': acceleration_error,
                 'eval/min_mpjpe': min_mpjpe,
-                'eval/p-mpjpe': p_mpjpe,
-                'eval_additional/upper_body_error': np.mean(joints_error[H36M_UPPER_BODY_JOINTS]),
-                'eval_additional/lower_body_error': np.mean(joints_error[H36M_LOWER_BODY_JOINTS]),
-                'eval_additional/1_DF_error': np.mean(joints_error[H36M_1_DF]),
-                'eval_additional/2_DF_error': np.mean(joints_error[H36M_2_DF]),
-                'eval_additional/3_DF_error': np.mean(joints_error[H36M_3_DF]),
-                **joint_label_errors
             }, step=epoch + 1)
 
-
-
-        # TODO This needs to change to show decay in all three learning rates
         lr = decay_lr_exponentially(lr, lr_decay, optimizer)
 
     if opts.use_wandb:
@@ -576,16 +435,15 @@ def train(args, opts):
         wandb.log_artifact(artifact)
 
 
+
 def main():
     opts = parse_args()
     set_random_seed(opts.seed)
     torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
     args = get_config(opts.config)
 
-    
-    
     train(args, opts)
-
 
 if __name__ == '__main__':
     main()

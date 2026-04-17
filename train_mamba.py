@@ -496,7 +496,24 @@ def train(args, opts):
             exit()
 
         print(f"[INFO] epoch {epoch}")
-        loss_names = ['3d_pose', '3d_scale', '2d_proj', 'lg', 'lv', '3d_velocity', 'angle', 'angle_velocity', 'total']
+        loss_names = [
+            '3d_pose', 
+            '3d_scale',
+            '2d_proj',
+            'lg', 
+            'lv', 
+            '3d_velocity', 
+            'angle', 
+            'angle_velocity', 
+            'total',
+            "3d_pose_mamba",
+            "3d_scale_mamba",
+            "3d_velocity_mamba",
+            "lv_mamba",
+            "lg_mamba",
+            "angle_mamba",
+            "angle_velocity_mamba",
+            "total_mamba",]
         losses = {name: AverageMeter() for name in loss_names}
 
         train_one_epoch(args,model_agformer, model_mamba_head,gate, train_loader, optimizer, device, losses)# This function now takes in 2 models instead of just one
