@@ -1,15 +1,11 @@
 
-# TODO Add this to config mamba_dim_hidden,args.mamba_d_state,args.mamba_d_conv,args.mamba_expand
-# TODO Train one epoch function DONE
-# TODO complete the evaluate function DONE 
-# TODO complete the config file 
-#  test all configurations 
-#  Complete checkpoint saving function to save dict differently now DONE 
 import argparse
 import os
+from xml.parsers.expat import model
+import pkg_resources
 
 import numpy as np
-import pkg_resources
+import scipy.io as scio
 import torch
 import wandb
 from torch import optim
@@ -17,38 +13,26 @@ from tqdm import tqdm
 
 from loss.pose3d import loss_mpjpe, n_mpjpe, loss_velocity, loss_limb_var, loss_limb_gt, loss_angle, \
     loss_angle_velocity
-from loss.pose3d import jpe as calculate_jpe
-from loss.pose3d import p_mpjpe as calculate_p_mpjpe
-from loss.pose3d import mpjpe as calculate_mpjpe
-from loss.pose3d import acc_error as calculate_acc_err
-from data.const import H36M_JOINT_TO_LABEL, H36M_UPPER_BODY_JOINTS, H36M_LOWER_BODY_JOINTS, H36M_1_DF, H36M_2_DF, \
-    H36M_3_DF
-from data.reader.h36m import DataReaderH36M
-from data.reader.motion_dataset import MotionDataset3D
-from utils.data import flip_data
+from utils.data import denormalize
+from data.reader.motion_dataset import MPI3DHP, Fusion
 from utils.tools import set_random_seed, get_config, print_args, create_directory_if_not_exists
 from torch.utils.data import DataLoader
 
 from utils.learning import load_model, AverageMeter, decay_lr_exponentially, load_model_mamba
 from utils.tools import count_param_numbers
-from utils.data import Augmenter2D
+from utils.utils_3dhp import *
 
 
-# Everything will be same except we will add another model specifically mamba to predict the residuals
-# the args parser must ensure the pretrained weights are passed, for first experiment we will train mamba on top of a pretrained model later if required move to one of the following or test them one by one by increasing the config
-# 1. Train both models together
-# 2. Finetune pretrained motion AGformer with full training of mamba head employee different lrs for the pretrained motion AGformer and mamba head
 
-DEBUG =True
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="configs/h36m/MotionAGFormer-base.yaml", help="Path to the config file.")
+    parser.add_argument("--config", type=str, default="configs/mpi/MotionAGFormer-large.yaml", help="Path to the config file.")
     parser.add_argument('-c', '--checkpoint', type=str, metavar='PATH',
                         help='checkpoint directory')
-    parser.add_argument('--new-checkpoint', type=str, metavar='PATH', default='checkpoint',
-                        help='new checkpoint directory')
     parser.add_argument('--checkpoint-file', type=str, help="checkpoint file name")
-    parser.add_argument('-sd', '--seed', default=0, type=int, help='random seed')
+    parser.add_argument('--new-checkpoint', type=str, metavar='PATH', default='mpi-checkpoint',
+                        help='new checkpoint directory')
+    parser.add_argument('-sd', '--seed', default=1, type=int, help='random seed')
     parser.add_argument('--num-cpus', default=16, type=int, help='Number of CPU cores')
     parser.add_argument('--use-wandb', action='store_true')
     parser.add_argument('--wandb-name', default=None, type=str)
@@ -57,7 +41,6 @@ def parse_args():
     parser.add_argument('--eval-only', action='store_true')
     opts = parser.parse_args()
     return opts
-
 
 def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_head: torch.nn.Module, gate: torch.nn.Module, train_loader:DataLoader, optimizer: torch.optim.Optimizer, device: torch.device, losses: dict):
 
@@ -156,6 +139,28 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
 
         loss_total.backward()
         optimizer.step()
+
+
+
+def input_augmentation(input_2D, model, joints_left, joints_right):
+    N, _, T, J, C = input_2D.shape 
+
+    input_2D_flip = input_2D[:, 1]
+    input_2D_non_flip = input_2D[:, 0]
+
+    output_3D_flip = model(input_2D_flip)
+
+    output_3D_flip[..., 0] *= -1
+
+    output_3D_flip[:, :, joints_left + joints_right, :] = output_3D_flip[:, :, joints_right + joints_left, :]
+
+    output_3D_non_flip = model(input_2D_non_flip)
+
+    output_3D = (output_3D_non_flip + output_3D_flip) / 2
+
+    input_2D = input_2D_non_flip
+
+    return input_2D, output_3D
 
 
 
@@ -351,40 +356,37 @@ def save_checkpoint(checkpoint_path, epoch, lr, optimizer, model_agformer, model
     }, checkpoint_path)
 
 
+def save_data_inference(path, data_inference, latest):
+    if latest:
+        mat_path = os.path.join(path, 'inference_data.mat')
+    else:
+        mat_path = os.path.join(path, 'inference_data_best.mat')
+    scio.savemat(mat_path, data_inference)
 
-from typing import Tuple
-from easydict import EasyDict 
-from argparse import Namespace
-def load_datasets_and_dataloaders(args:EasyDict, opts:Namespace) -> Tuple[DataLoader, DataLoader, DataReaderH36M]:
-    train_dataset = MotionDataset3D(args, args.subset_list, 'train')
-    test_dataset = MotionDataset3D(args, args.subset_list, 'test')
+
+
+
+def train(args, opts):
+    print_args(args)
+    create_directory_if_not_exists(opts.new_checkpoint)
+
+    train_dataset = MPI3DHP(args, train=True)
+    test_dataset = Fusion(args, train=False)
 
     common_loader_params = {
-        'batch_size': args.batch_size,
         'num_workers': opts.num_cpus - 1,
         'pin_memory': True,
         'prefetch_factor': (opts.num_cpus - 1) // 3,
         'persistent_workers': True
     }
-    train_loader = DataLoader(train_dataset, shuffle=True, **common_loader_params)
-    test_loader = DataLoader(test_dataset, shuffle=False, **common_loader_params)
-
-    datareader = DataReaderH36M(n_frames=args.n_frames, sample_stride=1,
-                                data_stride_train=args.n_frames // 3, data_stride_test=args.n_frames,
-                                dt_root='data/motion3d', dt_file=args.dt_file)  # Used for H36m evaluation
-
-    return train_loader, test_loader, datareader
-
-def train(args, opts):
-    print_args(args)
-    create_directory_if_not_exists(opts.new_checkpoint)
-    train_loader, test_loader, datareader = load_datasets_and_dataloaders(args, opts)
-        
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-
+    train_loader = DataLoader(train_dataset, shuffle=True, batch_size=args.batch_size, **common_loader_params)
+    test_loader = DataLoader(test_dataset, shuffle=False, batch_size=args.test_batch_size, **common_loader_params)
+    
     model_agformer = load_model(args)
-    model_mamba_head, gate = load_model_mamba(args) #TODO Return 2 models from this function a MLP Gate, and A mamba head
+    model_mamba_head, gate = load_model_mamba(args) 
 
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    
 
     if torch.cuda.is_available():
         model_agformer = torch.nn.DataParallel(model_agformer)
@@ -403,22 +405,37 @@ def train(args, opts):
     print(f"[INFO] Number of parameters in MLP gate: {params_gate:,}")
 
 
+    # TODO Define these params in config
+    lr_motion_former = args.learning_rate_motion_former 
+    lr_mamba = args.learning_rate_mamba
+    lr_gate = args.learning_rate_gate
+    
+
+    # TODO Define these params in config
+    lr_decay = args.lr_decay_agformer
+    lr_decay_mamba = args.lr_decay_mamba
+    lr_decay_gate = args.lr_decay_gate
+
+    # TODO Define these params in config
+    weight_decay_motion_former = args.weight_decay
+    weight_decay_mamba = args.weight_decay_mamba
+    weight_decay_gate = args.weight_decay_gate
 
 
     optimizer = torch.optim.AdamW([
     {
         "params": filter(lambda p: p.requires_grad, model_agformer.parameters()),
-        "lr": args.learning_rate_motion_former,
+        "lr": args.lr_agformer,
         "weight_decay": args.wd_agformer
     },
     {
         "params": filter(lambda p: p.requires_grad, model_mamba_head.parameters()),
-        "lr": args.learning_rate_mamba,
+        "lr": args.lr_mamba,
         "weight_decay": args.wd_mamba
     },
     {
         "params": filter(lambda p: p.requires_grad, gate.parameters()),
-        "lr": args.learning_rate_gate,
+        "lr": args.lr_gate,
         "weight_decay": args.wd_gate
     },
 ])

@@ -101,6 +101,8 @@ def input_augmentation(input_2D, model, joints_left, joints_right):
 
     return input_2D, output_3D
 
+
+
 def evaluate(model, test_loader, n_frames):
     model.eval()
     joints_left = [5, 6, 7, 11, 12, 13]
