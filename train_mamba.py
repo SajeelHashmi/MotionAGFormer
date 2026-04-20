@@ -405,6 +405,7 @@ def train(args, opts):
 
 
 
+    lr = args.learning_rate_motion_former  # Initial learning rate for AGFormer, Mamba head and gate will be set separately in the optimizer
 
     optimizer = torch.optim.AdamW([
     {

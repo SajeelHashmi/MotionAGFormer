@@ -293,7 +293,7 @@ def train(args, opts):
     print(f"[INFO] Number of parameters in MLP gate: {params_gate:,}")
 
 
-
+    lr = args.learning_rate_motion_former  # Initial learning rate for AGFormer, Mamba head and gate will be set separately in the optimizer
     optimizer = torch.optim.AdamW([
     {
         "params": filter(lambda p: p.requires_grad, model_agformer.parameters()),
