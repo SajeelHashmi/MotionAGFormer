@@ -139,3 +139,13 @@ def decay_lr_exponentially(lr, lr_decay, optimizer):
     for param_group in optimizer.param_groups:
         param_group['lr'] *= lr_decay
     return lr
+
+
+
+
+def decay_lr_exponentially_multi_model(optimizer, lr_decay):
+    new_lrs = []
+    for param_group in optimizer.param_groups:
+        param_group['lr'] *= lr_decay
+        new_lrs.append(param_group['lr'])
+    return new_lrs

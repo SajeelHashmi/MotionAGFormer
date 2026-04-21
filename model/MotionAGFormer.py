@@ -319,7 +319,7 @@ class MambaHead(nn.Module):
         )
 
         # project back to joint space
-        self.head = nn.Linear(dim_hidden, num_joints * dim_in)
+        self.head = nn.Linear(dim_hidden, num_joints * 3)
         nn.init.zeros_(self.head.weight)
         nn.init.zeros_(self.head.bias)
 
@@ -342,7 +342,7 @@ class MambaHead(nn.Module):
         # back to pose space
         x = self.head(x)  # (B, T, J*3)
 
-        x = x.view(B, T, J, C)
+        x = x.view(B, T, J, 3)
 
         return x
 
