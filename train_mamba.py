@@ -49,6 +49,10 @@ def parse_args():
                         help='checkpoint directory')
     parser.add_argument('--new-checkpoint', type=str, metavar='PATH', default='checkpoint',
                         help='new checkpoint directory')
+    
+    parser.add_argument('--pretrained-agformer', type=str, default=None,
+                    help='Path to pretrained AGFormer weights for mamba_head_only mode')
+    
     parser.add_argument('--checkpoint-file', type=str, help="checkpoint file name")
     parser.add_argument('-sd', '--seed', default=0, type=int, help='random seed')
     parser.add_argument('--num-cpus', default=16, type=int, help='Number of CPU cores')
@@ -64,7 +68,12 @@ def parse_args():
 def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_head: torch.nn.Module, gate: torch.nn.Module, train_loader:DataLoader, optimizer: torch.optim.Optimizer, device: torch.device, losses: dict):
 
     # Putting all three models in Train
-    model_agformer.train()
+    
+    if args.training_mode == 'mamba_head_only':
+        model_agformer.eval()  # keep frozen in eval mode regardless
+    else:
+        model_agformer.train()
+
     model_mamba_head.train()
     gate.train()
 
@@ -422,11 +431,21 @@ def train(args, opts):
     print_args(args)
     create_directory_if_not_exists(opts.new_checkpoint)
     train_loader, test_loader, datareader = load_datasets_and_dataloaders(args, opts)
+
+
         
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     model_agformer = load_model(args)
     model_mamba_head, gate = load_model_mamba(args) #TODO Return 2 models from this function a MLP Gate, and A mamba head
+    if args.training_mode == 'mamba_head_only':
+        if opts.pretrained_agformer is None:
+            print("[ERROR] mamba_head_only mode requires --pretrained-agformer path")
+            exit()
+        ag_ckpt = torch.load(opts.pretrained_agformer, map_location='cpu')
+        state_dict = ag_ckpt.get('model', ag_ckpt.get('model_agformer', ag_ckpt))
+        model_agformer.load_state_dict(state_dict, strict=True)
+        print(f"[INFO] Loaded pretrained AGFormer from {opts.pretrained_agformer}")
 
     lr_decay = args.lr_decay
 
