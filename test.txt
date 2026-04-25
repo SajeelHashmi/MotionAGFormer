@@ -1,0 +1,114 @@
+Instead of predicting poses from scratch, the Mamba model learns:
+
+refined_pose = base_prediction + alpha * residual
+
+Where the residual is predicted by the Mamba model, and alpha is either a learnable parameter or a constant scaling factor controlling how much the residual influences the final prediction.
+
+Working of the Mamba Head Module
+
+The model takes a sequence of poses:
+(B, T, J, C)
+
+B: Batch size
+T: Number of frames (time steps). This is determined by the AGFormer variant (e.g., 27 for smaller variants).
+J: Number of joints
+C: Channels per joint (3 for xyz, or 6 if using both AGFormer predictions and raw inputs)
+
+Each frame is flattened into a vector:
+
+(J, C) → (J × C)
+
+Each frame is then projected into a higher-dimensional feature space:
+
+(J × C) → dim_hidden
+
+This allows the model to learn more expressive representations compared to raw coordinates.
+
+The sequence of frame features is passed through a Mamba block, which models temporal dependencies.
+
+Mamba is a state-space model (SSM) that:
+
+Processes sequences efficiently in linear time
+Maintains a hidden state across time
+Captures both short-term and long-term dependencies
+
+Output Projection
+
+The processed features are mapped back to pose space:
+
+dim_hidden → (J × 3)
+
+This predicts a residual correction for each joint.
+
+Final pose is computed as:
+
+final_pose = base_prediction + alpha * residual
+
+This allows the model to focus on correcting AGFormer’s predictions instead of learning pose estimation from scratch.
+
+Mamba Internal Parameters
+
+d_model
+
+Feature dimension of the sequence (must match the embedding size)
+
+d_state
+
+Size of the internal state (memory)
+Controls how much past information is retained
+Larger values improve long-range modeling but increase computation
+
+d_conv
+
+Size of local temporal convolution
+Helps capture short-term dependencies between nearby frames
+Example: 4 means a small temporal window is used
+
+expand
+
+Expansion factor for internal channels
+Temporarily increases feature dimension inside the Mamba block
+
+This improves model capacity, similar to feedforward expansion in Transformers.
+
+Input Variants
+
+The Mamba head can take different inputs:
+
+pred → base model predictions
+raw → original input data
+both → concatenation of prediction and raw input (recommended)
+
+Residual Learning
+
+The model predicts:
+
+residual = MambaHead(input)
+
+Which is added to the base prediction:
+
+final = pred + gate * residual
+
+Alternatively, a constant scaling factor (alpha) can be used instead of a learned gate.
+
+Gating Mechanism
+
+A learnable gate controls how much correction to apply:
+
+final = pred + gate(pred) * residual
+
+This allows the model to:
+
+Apply strong corrections when needed
+Stay close to the base model when predictions are already accurate
+
+Initialization Strategy
+
+The output layer is initialized to zero:
+
+residual ≈ 0 at the start of training
+
+This ensures:
+
+Stable training
+No degradation of pretrained predictions at initialization
