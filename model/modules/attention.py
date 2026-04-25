@@ -233,13 +233,30 @@ class Skeleton:
 
 
 
-h36m_skeleton = Skeleton(parents=[-1,  0,  1,  2,  3,  4,  0,  6,  7,  8,  9,  0, 11, 12, 13, 14, 12,
-       16, 17, 18, 19, 20, 19, 22, 12, 24, 25, 26, 27, 28, 27, 30],
-       joints_left=[6, 7, 8, 9, 10, 16, 17, 18, 19, 20, 21, 22, 23],
-       joints_right=[1, 2, 3, 4, 5, 24, 25, 26, 27, 28, 29, 30, 31])
+CONNECTIONS = {10: [9], 9: [8, 10], 8: [7, 9], 
+               14: [15, 8], 15: [16, 14], 
+               11: [12, 8], 12: [13, 11],
+               7: [0, 8], 0: [1, 7], 
+               1: [2, 0], 2: [3, 1], 
+               4: [5, 0], 5: [6, 4], 
+               16: [15], 13: [12], 
+               3: [2], 6: [5]}
 
+# build adj directly from this
+def build_adj_from_connections(connections, num_joints=17):
+    adj = torch.zeros(num_joints, num_joints)
+    for joint, neighbors in connections.items():
+        for neighbor in neighbors:
+            adj[joint, neighbor] = 1
+            adj[neighbor, joint] = 1  # symmetric
+    # self connections
+    adj = adj + torch.eye(num_joints)
+    # normalize rows
+    row_sum = adj.sum(dim=1, keepdim=True)
+    adj = adj / row_sum
+    return adj  # [17, 17]
 
-adj = adj_mx_from_skeleton(h36m_skeleton)
+adj = build_adj_from_connections(CONNECTIONS, num_joints=17)
 
 
 
