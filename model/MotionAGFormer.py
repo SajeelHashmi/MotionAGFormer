@@ -292,8 +292,21 @@ from mamba_ssm import Mamba
 class MambaHead(nn.Module):
     """
     Temporal refinement head using Mamba.
+
+    This module learns a *temporal residual correction* over a sequence of poses.
+    It does NOT predict poses from scratch — instead it refines an existing sequence
+    (e.g., predictions from MotionAGFormer).
+
     Input:  (B, T, J, C)
-    Output: (B, T, J, C)
+        B = batch size
+        T = number of frames (time steps)
+        J = number of joints (e.g., 17)
+        C = channels per joint (e.g., 3 for xyz, or 6 if using raw input + predictions as input)
+
+    Output: (B, T, J, 3)
+        Residual correction in pose space (xyz per joint)
+        To be applied as Final_Pose = Base_Pose + alpha * Residual_Correction 
+        where alpha is either a learnable or a static scaler that controls how much correction to apply.
     """
 
     def __init__(self,
@@ -306,11 +319,32 @@ class MambaHead(nn.Module):
         super().__init__()
 
         self.num_joints = num_joints
+        self.dim_in = dim_in  # number of input channels per joint 3 or 6
 
-        # project joints into feature space
+        # --------------------------------------------------
+        # 1. Per-frame embedding
+        # --------------------------------------------------
+        # Each frame contains J joints with C channels → flattened into (J*C)
+        # This layer maps raw joint coordinates into a higher-dimensional feature space.
+        #
         self.joints_embed = nn.Linear(num_joints * dim_in, dim_hidden)
 
-        # Mamba sequence model (over time)
+        # --------------------------------------------------
+        # 2. Temporal modeling with Mamba
+        # --------------------------------------------------
+        # Mamba is a state-space sequence model:
+        #   - Processes the sequence along time (T dimension)
+        #   - Maintains a hidden state (memory) across frames
+        #   - Uses selective scanning instead of attention
+        #
+        # Key parameters:
+        #   d_model  : feature dimension 
+        #   d_state  : size of internal state 
+        #   d_conv   : local temporal convolution 
+        #   expand   : internal channel expansion factor
+        #
+        # expand > 1:
+        #   temporarily increases feature dimension inside Mamba
         self.mamba = Mamba(
             d_model=dim_hidden,
             d_state=d_state,
@@ -318,33 +352,54 @@ class MambaHead(nn.Module):
             expand=expand
         )
 
-        # project back to joint space
+        # --------------------------------------------------
+        # 3. Projection back to pose space
+        # --------------------------------------------------
+        # Maps temporal features back to joint coordinate space.
+        #
+        # Output dimension = J * 3 (xyz for each joint)
+        #
         self.head = nn.Linear(dim_hidden, num_joints * 3)
+
+        # Initialize to zero so that:
+        #   initial output ≈ 0 → no change to base prediction
+        #
+        # This is for stable residual learning. To start the model will always predict zero instead of random noise as we are operating under the assumption our 
+        # base model is already giving us somewhat good features
+        #
         nn.init.zeros_(self.head.weight)
         nn.init.zeros_(self.head.bias)
 
     def forward(self, x):
         """
-        x: (B, T, 17, 3)
+        Forward pass.
+
+        x: (B, T, J, C)
+           Can be:
+           - predicted poses
+           - raw input
+           - concatenation of both (e.g., C = 6)
+
+        Returns:
+            residual: (B, T, J, 3)
         """
 
         B, T, J, C = x.shape
 
-        # flatten joints
         x = x.view(B, T, J * C)
 
-        # embed per frame
-        x = self.joints_embed(x)  # (B, T, D)
+        x = self.joints_embed(x)
 
-        # temporal modeling
-        x = self.mamba(x)  # (B, T, D)
+        x = self.mamba(x)
 
-        # back to pose space
-        x = self.head(x)  # (B, T, J*3)
+        x = self.head(x)
 
         x = x.view(B, T, J, 3)
 
         return x
+
+
+
 
 class Gate(nn.Module):
     def __init__(self, num_joints=17, dim_in=3, dim_hidden=128):

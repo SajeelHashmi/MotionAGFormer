@@ -75,7 +75,7 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
         model_agformer.train()
 
     model_mamba_head.train()
-    gate.train()
+    # gate.train()
 
 
     for x, y in tqdm(train_loader):
@@ -102,10 +102,10 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
             exit()
         mamba_out = model_mamba_head(mamba_in) # (N, T, 17, 3)
 
-        gate_val = gate(pred.detach()) 
+        # gate_val = gate(pred.detach()) 
      
-        mamba_res = mamba_out * gate_val
-        pred_final = pred + mamba_res
+        # mamba_res = mamba_out * gate_val
+        pred_final = pred + (0.1 * mamba_out) # For now we will not use the gate and directly add the mamba output as residual, later we can experiment with using the gate as well
         
 
         # loss_3d_pos = loss_mpjpe(pred, y)
@@ -125,7 +125,8 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
         #             args.lambda_av * loss_av
 
 
-        # residual_gt = (y - pred).detach()
+        residual_gt = (y - pred).detach()
+        residual_loss = loss_mpjpe(mamba_out, residual_gt)
 
         loss_3d_pos_mamba = loss_mpjpe(pred_final, y)
         loss_3d_scale_mamba = n_mpjpe(pred_final, y)
@@ -141,7 +142,8 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
                     args.lambda_lv * loss_lv_mamba + \
                     args.lambda_lg * loss_lg_mamba + \
                     args.lambda_a * loss_a_mamba + \
-                    args.lambda_av * loss_av_mamba
+                    args.lambda_av * loss_av_mamba + \
+                    residual_loss * 0.1
 
         optimizer.zero_grad()
 
@@ -164,6 +166,7 @@ def train_one_epoch(args:EasyDict, model_agformer: torch.nn.Module, model_mamba_
         losses['angle'].update(loss_a_mamba.item(), batch_size)
         losses['angle_velocity'].update(loss_av_mamba.item(), batch_size)
         losses['total'].update(loss_total_mamba.item(), batch_size)
+        losses['residual_loss'].update(residual_loss.item(), batch_size)
         
 
         loss_total.backward()
@@ -177,7 +180,7 @@ def evaluate(args, model_agformer, model_mamba_head, gate, test_loader, dataread
     results_all_mamba = []
     model_mamba_head.eval()
     model_agformer.eval()
-    gate.eval()
+    # gate.eval()
 
     with torch.no_grad():
         for x, y in tqdm(test_loader):
@@ -198,8 +201,8 @@ def evaluate(args, model_agformer, model_mamba_head, gate, test_loader, dataread
                     exit()
 
                 residuals_1 = model_mamba_head(mamba_in_1)
-                gate_val_1 = gate(predicted_3d_pos_1_agformer.detach())
-                predicted_3d_pos_1 = predicted_3d_pos_1_agformer + residuals_1 * gate_val_1
+                # gate_val_1 = gate(predicted_3d_pos_1_agformer.detach())
+                predicted_3d_pos_1 = predicted_3d_pos_1_agformer + residuals_1 * 0.1
 
                 predicted_3d_pos_flip_agformer = model_agformer(batch_input_flip)
 
@@ -214,8 +217,8 @@ def evaluate(args, model_agformer, model_mamba_head, gate, test_loader, dataread
                     exit()
 
                 residuals_flip = model_mamba_head(mamba_in_flip)
-                gate_val_flip = gate(predicted_3d_pos_flip_agformer.detach())
-                predicted_3d_pos_flip = predicted_3d_pos_flip_agformer + residuals_flip * gate_val_flip
+                # gate_val_flip = gate(predicted_3d_pos_flip_agformer.detach())
+                predicted_3d_pos_flip = predicted_3d_pos_flip_agformer + residuals_flip * 0.1
 
                 predicted_3d_pos_mamba   = (predicted_3d_pos_1 + flip_data(predicted_3d_pos_flip)) / 2
                 predicted_3d_pos_ag_only = (predicted_3d_pos_1_agformer + flip_data(predicted_3d_pos_flip_agformer)) / 2
@@ -233,8 +236,8 @@ def evaluate(args, model_agformer, model_mamba_head, gate, test_loader, dataread
                     exit()
 
                 residuals = model_mamba_head(mamba_in)
-                gate_val = gate(predicted_3d_pos_ag_only.detach())
-                predicted_3d_pos_mamba = predicted_3d_pos_ag_only + residuals * gate_val
+                # gate_val = gate(predicted_3d_pos_ag_only.detach())
+                predicted_3d_pos_mamba = predicted_3d_pos_ag_only + residuals * 0.1
 
             if args.root_rel:
                 predicted_3d_pos_mamba[:, :, 0, :]   = 0
@@ -442,12 +445,17 @@ def train(args, opts):
         if opts.pretrained_agformer is None:
             print("[ERROR] mamba_head_only mode requires --pretrained-agformer path")
             exit()
-        ag_ckpt = torch.load(opts.pretrained_agformer, map_location='cpu')
+        ag_ckpt = torch.load(opts.pretrained_agformer,  map_location=lambda storage, loc: storage)
         state_dict = ag_ckpt.get('model', ag_ckpt.get('model_agformer', ag_ckpt))
+        if all(k.startswith('module.') for k in state_dict.keys()):
+            state_dict = {k[len('module.'):]: v for k, v in state_dict.items()}
         model_agformer.load_state_dict(state_dict, strict=True)
         print(f"[INFO] Loaded pretrained AGFormer from {opts.pretrained_agformer}")
 
     lr_decay = args.lr_decay
+
+
+        
 
     if torch.cuda.is_available():
         model_agformer = torch.nn.DataParallel(model_agformer)
@@ -567,6 +575,7 @@ def train(args, opts):
             'angle', 
             'angle_velocity', 
             'total',
+            'residual_loss'
             # "3d_pose_mamba",
             # "3d_scale_mamba",
             # "3d_velocity_mamba",
@@ -606,6 +615,7 @@ def train(args, opts):
                 'train/loss_angle': losses['angle'].avg,
                 'train/angle_velocity': losses['angle_velocity'].avg,
                 'train/total': losses['total'].avg,
+                'train/residual_loss': losses['residual_loss'].avg,
 
                 # Mamba (final model) metrics
                 'eval/mpjpe': mpjpe,
