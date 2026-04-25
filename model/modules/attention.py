@@ -65,196 +65,6 @@ class Attention_og(nn.Module):
 
 
 
-import torch
-class LearnableGraphConv(nn.Module):
-    """
-    Semantic graph convolution layer
-    """
-
-    def __init__(self, in_features, out_features, adj, bias=True):
-        super(LearnableGraphConv, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-
-        self.W = nn.Parameter(torch.zeros(size=(2, in_features, out_features), dtype=torch.float))
-        nn.init.xavier_uniform_(self.W.data, gain=1.414)
-
-        self.M = nn.Parameter(torch.ones(size=(adj.size(0), out_features), dtype=torch.float))
-
-        # spatial/temporal local topology
-        self.adj = adj
-        
-        # simulated spatial/temporal global topology
-        self.adj2 = nn.Parameter(torch.ones_like(adj))        
-        nn.init.constant_(self.adj2, 1e-6)
-
-        if bias:
-            self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float))
-            stdv = 1. / math.sqrt(self.W.size(2))
-            self.bias.data.uniform_(-stdv, stdv)
-        else:
-            self.register_parameter('bias', None)
-
-    def forward(self, input):
-        h0 = torch.matmul(input, self.W[0])
-        h1 = torch.matmul(input, self.W[1])
-        
-        adj = self.adj.to(input.device) + self.adj2.to(input.device)
-  
-        adj = (adj.T + adj)/2
-        
-        E = torch.eye(adj.size(0), dtype=torch.float).to(input.device)
-        
-        output = torch.matmul(adj * E, self.M*h0) + torch.matmul(adj * (1 - E), self.M*h1)
-        if self.bias is not None:
-            return output + self.bias.view(1, 1, -1)
-        else:
-            return output
-
-    def __repr__(self):
-        return self.__class__.__name__ + ' (' + str(self.in_features) + ' -> ' + str(self.out_features) + ')'
-
-
-
-
-class KPA(nn.Module):
-    def __init__(self, adj, input_dim, output_dim, p_dropout=None):
-        super(KPA, self).__init__()
-
-        self.gconv =  LearnableGraphConv(input_dim, output_dim, adj)
-        self.bn = nn.BatchNorm1d(output_dim)
-        self.relu = nn.ReLU()
-
-        if p_dropout is not None:
-            self.dropout = nn.Dropout(p_dropout)
-        else:
-            self.dropout = None
-
-    def forward(self, x):
-        x = self.gconv(x).transpose(1, 2)
-        x = self.bn(x).transpose(1, 2)
-        if self.dropout is not None:
-            x = self.dropout(self.relu(x))
-
-        x = self.relu(x)
-        return x
-
-
-class TPA(nn.Module):
-    def __init__(self, adj_temporal, input_dim, output_dim, p_dropout=None):
-        super(TPA, self).__init__()
-
-        self.gconv =  LearnableGraphConv(input_dim, output_dim, adj_temporal)
-        self.bn = nn.BatchNorm1d(output_dim)
-        self.relu = nn.ReLU()
-
-        if p_dropout is not None:
-            self.dropout = nn.Dropout(p_dropout)
-        else:
-            self.dropout = None
-
-    def forward(self, x):
-        x = self.gconv(x).transpose(1, 2)
-        x = self.bn(x).transpose(1, 2)
-        if self.dropout is not None:
-            x = self.dropout(self.relu(x))
-
-        x = self.relu(x)
-        return x
-    
-
-class Attention(nn.Module):
-    def __init__(self, adj, adj_temporal, dim_in, dim_out, 
-                 num_heads=8, qkv_bias=False, qk_scale=None, 
-                 attn_drop=0., proj_drop=0., mode='spatial'):
-        super().__init__()
-        self.num_heads = num_heads
-        head_dim = dim_in // num_heads
-        self.scale = qk_scale or head_dim ** -0.5
-        self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim_in, dim_out)
-        self.mode = mode
-        self.qkv = nn.Linear(dim_in, dim_in * 3, bias=qkv_bias)
-        self.proj_drop = nn.Dropout(proj_drop)
-
-        # only create what we need based on mode
-        if self.mode == 'spatial':
-            self.kpa = KPA(adj=adj, 
-                          input_dim=dim_in, 
-                          output_dim=dim_in,
-                          p_dropout=None)
-        elif self.mode == 'temporal':
-            self.tpa = TPA(adj_temporal=adj_temporal,
-                          input_dim=dim_in,
-                          output_dim=dim_in,
-                          p_dropout=None)
-
-    def forward(self, x):
-        B, T, J, C = x.shape
-
-        if self.mode == 'spatial':
-            # KPA needs [B*T, J, C]
-            x_in = x.reshape(B*T, J, C)
-            x_enriched = self.kpa(x_in)
-            # back to [B, T, J, C]
-            x_enriched = x_enriched.reshape(B, T, J, C)
-
-        elif self.mode == 'temporal':
-            # TPA needs [B*J, T, C]
-            x_in = x.permute(0, 2, 1, 3)  # [B, J, T, C]
-            x_in = x_in.reshape(B*J, T, C)
-            x_enriched = self.tpa(x_in)
-            # back to [B, T, J, C]
-            x_enriched = x_enriched.reshape(B, J, T, C)
-            x_enriched = x_enriched.permute(0, 2, 1, 3)
-
-        # residual addition — safe for first experiment
-        x = x + x_enriched
-
-        # rest is exactly same as original
-        qkv = self.qkv(x).reshape(
-            B, T, J, 3, self.num_heads, C // self.num_heads
-        ).permute(3, 0, 4, 1, 2, 5)
-
-        if self.mode == 'temporal':
-            q, k, v = qkv[0], qkv[1], qkv[2]
-            x = self.forward_temporal(q, k, v)
-        elif self.mode == 'spatial':
-            q, k, v = qkv[0], qkv[1], qkv[2]
-            x = self.forward_spatial(q, k, v)
-        else:
-            raise NotImplementedError(self.mode)
-
-        x = self.proj(x)
-        x = self.proj_drop(x)
-        return x
-
-    def forward_spatial(self, q, k, v):
-        B, H, T, J, C = q.shape
-        attn = (q @ k.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-        x = attn @ v
-
-        
-        x = x.permute(0, 2, 3, 1, 4).reshape(B, T, J, C * self.num_heads)
-        return x
-
-    def forward_temporal(self, q, k, v):
-        B, H, T, J, C = q.shape
-        qt = q.transpose(2, 3)
-        kt = k.transpose(2, 3)
-        vt = v.transpose(2, 3)
-        attn = (qt @ kt.transpose(-2, -1)) * self.scale
-        attn = attn.softmax(dim=-1)
-        attn = self.attn_drop(attn)
-        x = attn @ vt
-        x = x.permute(0, 3, 2, 1, 4).reshape(B, T, J, C * self.num_heads)
-        return x
-    
-
-
-
 # TODO Graph utils functions adding directly here for now, can move to separate file later if needed
 
 
@@ -430,3 +240,194 @@ h36m_skeleton = Skeleton(parents=[-1,  0,  1,  2,  3,  4,  0,  6,  7,  8,  9,  0
 
 
 adj = adj_mx_from_skeleton(h36m_skeleton)
+
+
+
+import torch
+import math
+class LearnableGraphConv(nn.Module):
+    """
+    Semantic graph convolution layer
+    """
+
+    def __init__(self, in_features, out_features, adj, bias=True):
+        super(LearnableGraphConv, self).__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+
+        self.W = nn.Parameter(torch.zeros(size=(2, in_features, out_features), dtype=torch.float))
+        nn.init.xavier_uniform_(self.W.data, gain=1.414)
+
+        self.M = nn.Parameter(torch.ones(size=(adj.size(0), out_features), dtype=torch.float))
+
+        # spatial/temporal local topology
+        self.adj = adj
+        
+        # simulated spatial/temporal global topology
+        self.adj2 = nn.Parameter(torch.ones_like(adj))        
+        nn.init.constant_(self.adj2, 1e-6)
+
+        if bias:
+            self.bias = nn.Parameter(torch.zeros(out_features, dtype=torch.float))
+            stdv = 1. / math.sqrt(self.W.size(2))
+            self.bias.data.uniform_(-stdv, stdv)
+        else:
+            self.register_parameter('bias', None)
+
+    def forward(self, input):
+        h0 = torch.matmul(input, self.W[0])
+        h1 = torch.matmul(input, self.W[1])
+        
+        adj = self.adj.to(input.device) + self.adj2.to(input.device)
+  
+        adj = (adj.T + adj)/2
+        
+        E = torch.eye(adj.size(0), dtype=torch.float).to(input.device)
+        
+        output = torch.matmul(adj * E, self.M*h0) + torch.matmul(adj * (1 - E), self.M*h1)
+        if self.bias is not None:
+            return output + self.bias.view(1, 1, -1)
+        else:
+            return output
+
+    def __repr__(self):
+        return self.__class__.__name__ + ' (' + str(self.in_features) + ' -> ' + str(self.out_features) + ')'
+
+
+
+
+class KPA(nn.Module):
+    def __init__(self, input_dim, output_dim, p_dropout=None, adj = adj):
+        super(KPA, self).__init__()
+
+        self.gconv =  LearnableGraphConv(input_dim, output_dim, adj)
+        self.bn = nn.BatchNorm1d(output_dim)
+        self.relu = nn.ReLU()
+
+        if p_dropout is not None:
+            self.dropout = nn.Dropout(p_dropout)
+        else:
+            self.dropout = None
+
+    def forward(self, x):
+        x = self.gconv(x).transpose(1, 2)
+        x = self.bn(x).transpose(1, 2)
+        if self.dropout is not None:
+            x = self.dropout(self.relu(x))
+
+        x = self.relu(x)
+        return x
+
+
+class TPA(nn.Module):
+    def __init__(self, input_dim, output_dim, p_dropout=None, adj_temporal=adj_temporal):
+        super(TPA, self).__init__()
+
+        self.gconv =  LearnableGraphConv(input_dim, output_dim, adj_temporal)
+        self.bn = nn.BatchNorm1d(output_dim)
+        self.relu = nn.ReLU()
+
+        if p_dropout is not None:
+            self.dropout = nn.Dropout(p_dropout)
+        else:
+            self.dropout = None
+
+    def forward(self, x):
+        x = self.gconv(x).transpose(1, 2)
+        x = self.bn(x).transpose(1, 2)
+        if self.dropout is not None:
+            x = self.dropout(self.relu(x))
+
+        x = self.relu(x)
+        return x
+    
+
+class Attention(nn.Module):
+    def __init__(self, dim_in, dim_out, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
+                 mode='spatial'):
+        super().__init__()
+        self.num_heads = num_heads
+        head_dim = dim_in // num_heads
+        self.scale = qk_scale or head_dim ** -0.5
+        self.attn_drop = nn.Dropout(attn_drop)
+        self.proj = nn.Linear(dim_in, dim_out)
+        self.mode = mode
+        self.qkv = nn.Linear(dim_in, dim_in * 3, bias=qkv_bias)
+        self.proj_drop = nn.Dropout(proj_drop)
+
+        # only create what we need based on mode
+        if self.mode == 'spatial':
+            self.kpa = KPA(input_dim=dim_in, 
+                          output_dim=dim_in,
+                          p_dropout=None)
+        elif self.mode == 'temporal':
+            self.tpa = TPA(input_dim=dim_in,
+                          output_dim=dim_in,
+                          p_dropout=None)
+
+    def forward(self, x):
+        B, T, J, C = x.shape
+
+        if self.mode == 'spatial':
+            # KPA needs [B*T, J, C]
+            x_in = x.reshape(B*T, J, C)
+            x_enriched = self.kpa(x_in)
+            # back to [B, T, J, C]
+            x_enriched = x_enriched.reshape(B, T, J, C)
+
+        elif self.mode == 'temporal':
+            # TPA needs [B*J, T, C]
+            x_in = x.permute(0, 2, 1, 3)  # [B, J, T, C]
+            x_in = x_in.reshape(B*J, T, C)
+            x_enriched = self.tpa(x_in)
+            # back to [B, T, J, C]
+            x_enriched = x_enriched.reshape(B, J, T, C)
+            x_enriched = x_enriched.permute(0, 2, 1, 3)
+
+        # residual addition — safe for first experiment
+        x = x + x_enriched
+
+        # rest is exactly same as original
+        qkv = self.qkv(x).reshape(
+            B, T, J, 3, self.num_heads, C // self.num_heads
+        ).permute(3, 0, 4, 1, 2, 5)
+
+        if self.mode == 'temporal':
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            x = self.forward_temporal(q, k, v)
+        elif self.mode == 'spatial':
+            q, k, v = qkv[0], qkv[1], qkv[2]
+            x = self.forward_spatial(q, k, v)
+        else:
+            raise NotImplementedError(self.mode)
+
+        x = self.proj(x)
+        x = self.proj_drop(x)
+        return x
+
+    def forward_spatial(self, q, k, v):
+        B, H, T, J, C = q.shape
+        attn = (q @ k.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x = attn @ v
+
+        
+        x = x.permute(0, 2, 3, 1, 4).reshape(B, T, J, C * self.num_heads)
+        return x
+
+    def forward_temporal(self, q, k, v):
+        B, H, T, J, C = q.shape
+        qt = q.transpose(2, 3)
+        kt = k.transpose(2, 3)
+        vt = v.transpose(2, 3)
+        attn = (qt @ kt.transpose(-2, -1)) * self.scale
+        attn = attn.softmax(dim=-1)
+        attn = self.attn_drop(attn)
+        x = attn @ vt
+        x = x.permute(0, 3, 2, 1, 4).reshape(B, T, J, C * self.num_heads)
+        return x
+    
+
+
+
