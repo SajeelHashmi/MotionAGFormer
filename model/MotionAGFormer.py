@@ -8,6 +8,7 @@ from model.modules.attention import Attention
 from model.modules.graph import GCN
 from model.modules.mlp import MLP
 from model.modules.tcn import MultiScaleTCN
+from model.modules.mamba import MambaMixer
 
 
 class AGFormerBlock(nn.Module):
@@ -31,6 +32,19 @@ class AGFormerBlock(nn.Module):
                              mode=mode,
                              use_temporal_similarity=use_temporal_similarity,
                              temporal_connection_len=temporal_connection_len)
+
+        elif mixer_type == 'mamba':
+            # TODO Make the configuration of mamba mixer be controlled by config file
+            self.mixer = MambaMixer(
+                dim=dim,
+                mode=mode,
+                d_state=16,
+                d_conv=4,
+                expand=2
+            )
+
+
+
         elif mixer_type == "ms-tcn":
             self.mixer = MultiScaleTCN(in_channels=dim, out_channels=dim)
         else:
@@ -107,10 +121,28 @@ class MotionAGFormerBlock(nn.Module):
                                           use_temporal_similarity=use_temporal_similarity,
                                           temporal_connection_len=temporal_connection_len)
         else:
+            # TODO Changing this to MambaMixer adding TODO for finding it easily
+            # self.graph_spatial = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
+            #                                    qkv_bias,
+            #                                    qk_scale, use_layer_scale, layer_scale_init_value,
+            #                                    mode='spatial', mixer_type="graph",
+            #                                    use_temporal_similarity=use_temporal_similarity,
+            #                                    temporal_connection_len=temporal_connection_len,
+            #                                    neighbour_num=neighbour_num,
+            #                                    n_frames=n_frames)
+            # self.graph_temporal = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
+            #                                     qkv_bias,
+            #                                     qk_scale, use_layer_scale, layer_scale_init_value,
+            #                                     mode='temporal', mixer_type="ms-tcn" if use_tcn else 'graph',
+            #                                     use_temporal_similarity=use_temporal_similarity,
+            #                                     temporal_connection_len=temporal_connection_len,
+            #                                     neighbour_num=neighbour_num,
+            #                                     n_frames=n_frames)
+
             self.graph_spatial = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                qkv_bias,
                                                qk_scale, use_layer_scale, layer_scale_init_value,
-                                               mode='spatial', mixer_type="graph",
+                                               mode='spatial', mixer_type="mamba",
                                                use_temporal_similarity=use_temporal_similarity,
                                                temporal_connection_len=temporal_connection_len,
                                                neighbour_num=neighbour_num,
@@ -118,11 +150,13 @@ class MotionAGFormerBlock(nn.Module):
             self.graph_temporal = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                 qkv_bias,
                                                 qk_scale, use_layer_scale, layer_scale_init_value,
-                                                mode='temporal', mixer_type="ms-tcn" if use_tcn else 'graph',
+                                                mode='temporal', mixer_type="mamba",
                                                 use_temporal_similarity=use_temporal_similarity,
                                                 temporal_connection_len=temporal_connection_len,
                                                 neighbour_num=neighbour_num,
                                                 n_frames=n_frames)
+
+            
 
         self.use_adaptive_fusion = use_adaptive_fusion
         if self.use_adaptive_fusion:
