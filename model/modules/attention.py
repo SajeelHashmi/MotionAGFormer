@@ -3,7 +3,7 @@ from torch import nn
 
 
 
-class Attention_og(nn.Module):
+class Attention(nn.Module):
     """
     A simplified version of attention from DSTFormer that also considers x tensor to be (B, T, J, C) instead of
     (B * T, J, C)
@@ -481,7 +481,7 @@ class StackedTPA(nn.Module):
         out = self.gconv2(out)
         return residual + out
 
-class Attention(nn.Module):
+class Attention_KPA(nn.Module):
     def __init__(self, dim_in, dim_out, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
                  mode='spatial'):
         super().__init__()
