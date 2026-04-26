@@ -3,3 +3,4 @@
 *.pyc
 wandb
 checkpoint/*.pth.tr
+data/motion3d/
