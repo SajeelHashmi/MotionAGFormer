@@ -138,7 +138,7 @@ def adj_mx_from_skeleton_temporal_extra3(num_frame, parents, parents_extra):
 
 
 
-temporal_skeleton = list(range(0, 27))
+temporal_skeleton = list(range(0, 243))
 
 temporal_skeleton = np.array(temporal_skeleton)
 
@@ -146,7 +146,41 @@ temporal_skeleton -= 1
 
 #temporal topology
 
-adj_temporal = adj_mx_from_skeleton_temporal(27, temporal_skeleton)
+def build_rich_temporal_adj(num_frames, max_distance=3):
+    """
+    Instead of just connecting to frame-1
+    connect to multiple past and future frames
+    with distance-based weighting
+    """
+    adj = torch.zeros(num_frames, num_frames)
+    
+    for i in range(num_frames):
+        for d in range(1, max_distance+1):
+            weight = 1.0 / d  # closer = stronger
+            
+            # past frames
+            if i - d >= 0:
+                adj[i, i-d] = weight
+            # future frames
+            if i + d < num_frames:
+                adj[i, i+d] = weight
+    
+    # self connections
+    adj = adj + torch.eye(num_frames)
+    
+    # normalize
+    row_sum = adj.sum(dim=1, keepdim=True)
+    adj = adj / row_sum
+    
+    return adj  # [T, T]
+
+
+
+# CHANGE THIS FOR EXPERIMENT WITH BASE VARIANT
+adj_temporal = build_rich_temporal_adj(
+                num_frames=243,
+                max_distance=3
+            ) 
 
 
 #spatial topology
@@ -258,6 +292,39 @@ def build_adj_from_connections(connections, num_joints=17):
 
 adj = build_adj_from_connections(CONNECTIONS, num_joints=17)
 
+def build_multiscale_adj(adj, num_hops=2):
+    """
+    adj: [17,17] original skeleton adjacency
+    returns list of adjacency matrices
+    one per hop distance
+    """
+    adjs = [adj]  # 1-hop
+    
+    current = adj
+    for hop in range(2, num_hops+1):
+        # matrix multiply gives us hop connections
+        next_hop = torch.mm(current, adj)
+        
+        # only keep NEW connections
+        # that weren't in previous hops
+        for prev_adj in adjs:
+            next_hop = next_hop * (prev_adj == 0).float()
+        
+        # binarize (just connectivity, not weights)
+        next_hop = (next_hop > 0).float()
+        
+        # normalize rows
+        row_sum = next_hop.sum(dim=1, keepdim=True)
+        row_sum = row_sum.clamp(min=1)  # avoid div by zero
+        next_hop = next_hop / row_sum
+        
+        adjs.append(next_hop)
+        current = next_hop
+    
+    return adjs  # [adj_1hop, adj_2hop, ...]
+
+
+
 
 
 import torch
@@ -335,6 +402,49 @@ class KPA(nn.Module):
         x = self.relu(x)
         return x
 
+class MultiScaleKPA(nn.Module):
+    def __init__(self, input_dim, output_dim, p_dropout=None ,adj = adj, num_hops=2, ):
+        super().__init__()
+        
+        # build adjacency for each scale
+        adjs = build_multiscale_adj(adj, num_hops)
+        
+        # separate KPA for each scale
+        # each learns different relationship patterns
+        self.kpa_layers = nn.ModuleList([
+            KPA(adj=adjs[i],
+                input_dim=input_dim,
+                output_dim=output_dim,
+                p_dropout=p_dropout)
+            for i in range(num_hops)
+        ])
+        
+        self.scale_weights = nn.Parameter(
+            torch.ones(num_hops) / num_hops
+        )
+        
+        # learnable layer scale
+        # controls overall KPA contribution
+        self.layer_scale = nn.Parameter(
+            torch.ones(1) * 0.1
+        )
+    
+    def forward(self, x):
+        # x: [B*T, J, C]
+        
+        # normalize scale weights
+        weights = self.scale_weights.softmax(dim=0)
+        
+        # aggregate across scales
+        out = torch.zeros_like(x)
+        for i, kpa in enumerate(self.kpa_layers):
+            out = out + weights[i] * kpa(x)
+        
+        # apply layer scale
+        return self.layer_scale * out
+    
+
+
 
 class TPA(nn.Module):
     def __init__(self, input_dim, output_dim, p_dropout=None, adj_temporal=adj_temporal):
@@ -359,6 +469,18 @@ class TPA(nn.Module):
         return x
     
 
+class StackedTPA(nn.Module):
+    def __init__(self, input_dim, output_dim, hid_dim, p_dropout):
+        super().__init__()
+        self.gconv1 = TPA( input_dim, hid_dim, p_dropout)
+        self.gconv2 = TPA( hid_dim, output_dim, p_dropout)
+
+    def forward(self, x):
+        residual = x
+        out = self.gconv1(x)
+        out = self.gconv2(out)
+        return residual + out
+
 class Attention(nn.Module):
     def __init__(self, dim_in, dim_out, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
                  mode='spatial'):
@@ -374,33 +496,46 @@ class Attention(nn.Module):
 
         # only create what we need based on mode
         if self.mode == 'spatial':
-            self.kpa = KPA(input_dim=dim_in, 
-                          output_dim=dim_in,
-                          p_dropout=None)
+                      
+            self.kpa = MultiScaleKPA(
+                            input_dim=dim_in, 
+                            output_dim=dim_in,
+                            p_dropout=None)
         elif self.mode == 'temporal':
-            self.tpa = TPA(input_dim=dim_in,
-                          output_dim=dim_in,
-                          p_dropout=None)
+            
+            
+            self.tpa = StackedTPA(
+                input_dim=dim_in,
+                output_dim=dim_in,
+                p_dropout=None,
+                hid_dim=dim_in             
+                
+            )
+            # layer scale for TPA too
+            self.tpa_scale = nn.Parameter(
+                torch.ones(1) * 0.1
+            )
 
     def forward(self, x):
         B, T, J, C = x.shape
 
         if self.mode == 'spatial':
-            # KPA needs [B*T, J, C]
             x_in = x.reshape(B*T, J, C)
+            # MultiScaleKPA handles
+            # layer scaling internally
             x_enriched = self.kpa(x_in)
-            # back to [B, T, J, C]
             x_enriched = x_enriched.reshape(B, T, J, C)
 
+
+
         elif self.mode == 'temporal':
-            # TPA needs [B*J, T, C]
-            x_in = x.permute(0, 2, 1, 3)  # [B, J, T, C]
+            x_in = x.permute(0, 2, 1, 3)
             x_in = x_in.reshape(B*J, T, C)
-            x_enriched = self.tpa(x_in)
-            # back to [B, T, J, C]
+            x_enriched = self.tpa_scale * self.tpa(x_in)
             x_enriched = x_enriched.reshape(B, J, T, C)
             x_enriched = x_enriched.permute(0, 2, 1, 3)
 
+            
         # residual addition — safe for first experiment
         x = x + x_enriched
 
