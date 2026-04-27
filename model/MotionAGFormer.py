@@ -95,13 +95,13 @@ class MotionAGFormerBlock(nn.Module):
         # ST Attention branch
         self.att_spatial = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads, qkv_bias,
                                          qk_scale, use_layer_scale, layer_scale_init_value,
-                                         mode='spatial', mixer_type="attention",
+                                         mode='spatial', mixer_type="mamba",
                                          use_temporal_similarity=use_temporal_similarity,
                                          neighbour_num=neighbour_num,
                                          n_frames=n_frames)
         self.att_temporal = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads, qkv_bias,
                                           qk_scale, use_layer_scale, layer_scale_init_value,
-                                          mode='temporal', mixer_type="attention",
+                                          mode='temporal', mixer_type="mamba",
                                           use_temporal_similarity=use_temporal_similarity,
                                           neighbour_num=neighbour_num,
                                           n_frames=n_frames)
@@ -122,25 +122,6 @@ class MotionAGFormerBlock(nn.Module):
                                           temporal_connection_len=temporal_connection_len)
         else:
             # TODO Changing this to MambaMixer adding TODO for finding it easily
-            # self.graph_spatial = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
-            #                                    qkv_bias,
-            #                                    qk_scale, use_layer_scale, layer_scale_init_value,
-            #                                    mode='spatial', mixer_type="graph",
-            #                                    use_temporal_similarity=use_temporal_similarity,
-            #                                    temporal_connection_len=temporal_connection_len,
-            #                                    neighbour_num=neighbour_num,
-            #                                    n_frames=n_frames)
-            # self.graph_temporal = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
-            #                                     qkv_bias,
-            #                                     qk_scale, use_layer_scale, layer_scale_init_value,
-            #                                     mode='temporal', mixer_type="ms-tcn" if use_tcn else 'graph',
-            #                                     use_temporal_similarity=use_temporal_similarity,
-            #                                     temporal_connection_len=temporal_connection_len,
-            #                                     neighbour_num=neighbour_num,
-            #                                     n_frames=n_frames)
-
-
-            # Experiment Keeping GraphFormer for spatial part and using MambaMixer for temporal part
             self.graph_spatial = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                qkv_bias,
                                                qk_scale, use_layer_scale, layer_scale_init_value,
@@ -149,16 +130,35 @@ class MotionAGFormerBlock(nn.Module):
                                                temporal_connection_len=temporal_connection_len,
                                                neighbour_num=neighbour_num,
                                                n_frames=n_frames)
-
-                                               
             self.graph_temporal = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                 qkv_bias,
                                                 qk_scale, use_layer_scale, layer_scale_init_value,
-                                                mode='temporal', mixer_type="mamba",
+                                                mode='temporal', mixer_type="ms-tcn" if use_tcn else 'graph',
                                                 use_temporal_similarity=use_temporal_similarity,
                                                 temporal_connection_len=temporal_connection_len,
                                                 neighbour_num=neighbour_num,
                                                 n_frames=n_frames)
+
+
+            # Experiment Keeping GraphFormer for spatial part and using MambaMixer for temporal part
+            # self.graph_spatial = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
+            #                                    qkv_bias,
+            #                                    qk_scale, use_layer_scale, layer_scale_init_value,
+            #                                    mode='spatial', mixer_type="graph",
+            #                                    use_temporal_similarity=use_temporal_similarity,
+            #                                    temporal_connection_len=temporal_connection_len,
+            #                                    neighbour_num=neighbour_num,
+            #                                    n_frames=n_frames)
+
+                                               
+            # self.graph_temporal = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
+            #                                     qkv_bias,
+            #                                     qk_scale, use_layer_scale, layer_scale_init_value,
+            #                                     mode='temporal', mixer_type="mamba",
+            #                                     use_temporal_similarity=use_temporal_similarity,
+            #                                     temporal_connection_len=temporal_connection_len,
+            #                                     neighbour_num=neighbour_num,
+            #                                     n_frames=n_frames)
 
             
 
