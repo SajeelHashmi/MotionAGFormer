@@ -356,6 +356,7 @@ def train(args, opts):
             }, step=epoch + 1)
 
         lr = decay_lr_exponentially(lr, lr_decay, optimizer)
+        print("This USES MAMBA MIXER GCN TOTALLY REPLACED WITH MAMBA")
 
     if opts.use_wandb:
         artifact = wandb.Artifact(f'model', type='model')
