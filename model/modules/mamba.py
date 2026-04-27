@@ -124,7 +124,7 @@ class MambaMixer(nn.Module):
                  d_state=16,
                  d_conv=4,
                  expand=2,
-                 use_kpa=False,
+                 use_kpa=True,
                  use_tpa=False,
                  dropout=0.0):
         super().__init__()
