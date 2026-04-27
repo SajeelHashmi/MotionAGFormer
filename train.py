@@ -356,6 +356,7 @@ def train(args, opts):
             }, step=epoch + 1)
 
         lr = decay_lr_exponentially(lr, lr_decay, optimizer)
+        print("PRINTING TO MAKE SURE THIS IS GCN -> Mamba BRANCH")
 
     if opts.use_wandb:
         artifact = wandb.Artifact(f'model', type='model')
