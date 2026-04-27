@@ -139,14 +139,18 @@ class MotionAGFormerBlock(nn.Module):
             #                                     neighbour_num=neighbour_num,
             #                                     n_frames=n_frames)
 
+
+            # Experiment Keeping GraphFormer for spatial part and using MambaMixer for temporal part
             self.graph_spatial = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                qkv_bias,
                                                qk_scale, use_layer_scale, layer_scale_init_value,
-                                               mode='spatial', mixer_type="mamba",
+                                               mode='spatial', mixer_type="graph",
                                                use_temporal_similarity=use_temporal_similarity,
                                                temporal_connection_len=temporal_connection_len,
                                                neighbour_num=neighbour_num,
                                                n_frames=n_frames)
+
+                                               
             self.graph_temporal = AGFormerBlock(dim, mlp_ratio, act_layer, attn_drop, drop, drop_path, num_heads,
                                                 qkv_bias,
                                                 qk_scale, use_layer_scale, layer_scale_init_value,
