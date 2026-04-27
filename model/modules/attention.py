@@ -381,9 +381,11 @@ class LearnableGraphConv(nn.Module):
 
 
 class KPA(nn.Module):
-    def __init__(self, input_dim, output_dim, p_dropout=None, adj = adj):
-        super(KPA, self).__init__()
+    def __init__(self, input_dim, output_dim, p_dropout=None, adj = None):
 
+        super(KPA, self).__init__()
+        if adj is None:
+            raise ValueError("Adjacency matrix must be provided for KPA")
         self.gconv =  LearnableGraphConv(input_dim, output_dim, adj)
         self.bn = nn.BatchNorm1d(output_dim)
         self.relu = nn.ReLU()

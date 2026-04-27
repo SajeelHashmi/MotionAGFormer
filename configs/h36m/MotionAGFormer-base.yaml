@@ -1,23 +1,10 @@
 #Training
 learning_rate: 0.0005
-
-learning_rate_motion_former: 0.0005
-learning_rate_mamba: 0.0005
-learning_rate_gate: 0.0005
-
 batch_size: 16
 weight_decay: 0.01
 lr_decay: 0.99
 epochs: 60
-
-wd_agformer: 0.01
-wd_mamba: 0.01
-wd_gate: 0.01
-
-
 train_2d: False
-
-
 
 # Model
 model_name: MotionAGFormer
@@ -65,14 +52,3 @@ lambda_av: 0.0
 # Augmentation
 use_proj_as_2d: False
 flip: True
-
-# Mamba Config
-mamba_dim_hidden: 256
-mamba_d_state: 24
-mamba_d_conv: 4
-mamba_expand: 2
-use_regularization: True
-
-training_mode: joint        # mamba_head_only | joint
-
-mamba_input: both            # pred | raw | both
