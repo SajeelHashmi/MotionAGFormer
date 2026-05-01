@@ -3,23 +3,7 @@ import torch.nn as nn
 from mamba_ssm import Mamba
 
 
-# CONNECTIONS = {10: [9], 9: [8, 10], 8: [7, 9], 
-#                14: [15, 8], 15: [16, 14], 
-#                11: [12, 8], 12: [13, 11],
-#                7: [0, 8], 0: [1, 7], 
-#                1: [2, 0], 2: [3, 1], 
-#                4: [5, 0], 5: [6, 4], 
-#                16: [15], 13: [12], 
-#                3: [2], 6: [5]}
 
-CONNECTIONS = {10: [9], 9: [8, 10], 8: [7, 9], 
-               14: [15, 8], 15: [16, 14], 
-               11: [12, 8], 12: [13, 11],
-               7: [0, 8], 0: [1, 7], 
-               1: [2, 0], 2: [3, 1], 
-               4: [5, 0], 5: [6, 4], 
-               16: [15], 13: [12], 
-               3: [2], 6: [5]}
 
 # build adj directly from this
 def build_adj_from_connections(connections, num_joints=17):
@@ -34,11 +18,6 @@ def build_adj_from_connections(connections, num_joints=17):
     row_sum = adj.sum(dim=1, keepdim=True)
     adj = adj / row_sum
     return adj  # [17, 17]
-
-adj = build_adj_from_connections(CONNECTIONS, num_joints=17)
-
-
-
 
 
 
@@ -94,7 +73,7 @@ class LearnableGraphConv(nn.Module):
 
 
 class KPA(nn.Module):
-    def __init__(self, input_dim, output_dim, p_dropout=None, adj = adj):
+    def __init__(self, input_dim, output_dim, p_dropout=None, adj = None):
         super(KPA, self).__init__()
 
         self.gconv =  LearnableGraphConv(input_dim, output_dim, adj)
@@ -114,6 +93,18 @@ class KPA(nn.Module):
 
         x = self.relu(x)
         return x
+    
+CONNECTIONS = {10: [9], 9: [8, 10], 8: [7, 9], 
+               14: [15, 8], 15: [16, 14], 
+               11: [12, 8], 12: [13, 11],
+               7: [0, 8], 0: [1, 7], 
+               1: [2, 0], 2: [3, 1], 
+               4: [5, 0], 5: [6, 4], 
+               16: [15], 13: [12], 
+               3: [2], 6: [5]}
+
+
+
 
 
 
@@ -126,17 +117,21 @@ class MambaMixer(nn.Module):
                  expand=2,
                  use_kpa=False,
                  use_tpa=False,
-                 dropout=0.0):
+                 dropout=0.0,
+                 dataset = "h36m"):
         super().__init__()
 
 
         self.mode = mode
         self.use_kpa = use_kpa
         self.use_tpa = use_tpa
+        
 
         # optional structure modules
         if use_kpa:
-            self.kpa = KPA(input_dim=dim, output_dim=dim, p_dropout=dropout)
+            connections = CONNECTIONS
+            adj = build_adj_from_connections(connections, num_joints=17)
+            self.kpa = KPA(input_dim=dim, output_dim=dim, p_dropout=dropout, adj=adj)
 
 
         # core mamba

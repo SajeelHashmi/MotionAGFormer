@@ -10,7 +10,7 @@ from torch import optim
 from tqdm import tqdm
 
 from loss.pose3d import loss_mpjpe, n_mpjpe, loss_velocity, loss_limb_var, loss_limb_gt, loss_angle, \
-    loss_angle_velocity
+    loss_angle_velocity, loss_acceleration
 from utils.data import denormalize
 from data.reader.motion_dataset import MPI3DHP, Fusion
 from utils.tools import set_random_seed, get_config, print_args, create_directory_if_not_exists
@@ -59,6 +59,7 @@ def train_one_epoch(args, model, train_loader, optimizer, losses):
         loss_lg = loss_limb_gt(pred, y)
         loss_a = loss_angle(pred, y)
         loss_av = loss_angle_velocity(pred, y)
+        loss_acc = loss_acceleration(pred, y)
 
         loss_total = loss_3d_pos + \
                     args.lambda_scale * loss_3d_scale + \
@@ -66,15 +67,18 @@ def train_one_epoch(args, model, train_loader, optimizer, losses):
                     args.lambda_lv * loss_lv + \
                     args.lambda_lg * loss_lg + \
                     args.lambda_a * loss_a + \
-                    args.lambda_av * loss_av
+                    args.lambda_av * loss_av + \
+                    args.lambda_acc * loss_acc
 
         losses['3d_pose'].update(loss_3d_pos.item(), batch_size)
         losses['3d_scale'].update(loss_3d_scale.item(), batch_size)
         losses['3d_velocity'].update(loss_3d_velocity.item(), batch_size)
+        
         losses['lv'].update(loss_lv.item(), batch_size)
         losses['lg'].update(loss_lg.item(), batch_size)
         losses['angle'].update(loss_a.item(), batch_size)
         losses['angle_velocity'].update(loss_av.item(), batch_size)
+        losses['acceleration'].update(loss_acc.item(), batch_size)
         losses['total'].update(loss_total.item(), batch_size)
 
         loss_total.backward()
@@ -253,7 +257,7 @@ def train(args, opts):
                 exit()
             
         print(f"[INFO] epoch {epoch}")
-        loss_names = ['3d_pose', '3d_scale', '2d_proj', 'lg', 'lv', '3d_velocity', 'angle', 'angle_velocity', 'total']
+        loss_names = ['3d_pose', '3d_scale', '2d_proj', 'lg', 'lv', '3d_velocity', 'angle', 'angle_velocity', 'total',"acceleration"]
         losses = {name: AverageMeter() for name in loss_names}
     
         train_one_epoch(args, model, train_loader, optimizer, losses)
@@ -274,6 +278,7 @@ def train(args, opts):
                 'train/loss_3d_scale': losses['3d_scale'].avg,
                 'train/loss_3d_velocity': losses['3d_velocity'].avg,
                 'train/loss_2d_proj': losses['2d_proj'].avg,
+                'train/loss_acceleration': losses['acceleration'].avg,
                 'train/loss_lg': losses['lg'].avg,
                 'train/loss_lv': losses['lv'].avg,
                 'train/loss_angle': losses['angle'].avg,

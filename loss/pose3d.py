@@ -237,3 +237,16 @@ def loss_angle_velocity(x, gt):
     x_av = x_a[:, 1:] - x_a[:, :-1]
     gt_av = gt_a[:, 1:] - gt_a[:, :-1]
     return nn.L1Loss()(x_av, gt_av)
+
+def loss_acceleration(predicted, target):
+    """
+    Acceleration loss based on second-order temporal difference.
+    predicted, target: [B, T, J, 3]
+    """
+    if predicted.shape[1] < 3:
+        return predicted.new_tensor(0.0)
+
+    pred_acc = predicted[:, 2:] - 2 * predicted[:, 1:-1] + predicted[:, :-2]
+    target_acc = target[:, 2:] - 2 * target[:, 1:-1] + target[:, :-2]
+
+    return torch.mean(torch.norm(pred_acc - target_acc, dim=-1))
