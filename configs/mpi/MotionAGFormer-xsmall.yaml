@@ -62,7 +62,7 @@ lambda_lv: 0.0
 lambda_lg: 0.0
 lambda_a: 0.0
 lambda_av: 0.0
-
+lambda_acc: 0.5
 
 mamba_dim_hidden: 128
 mamba_d_state: 16
