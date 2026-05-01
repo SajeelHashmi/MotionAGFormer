@@ -177,10 +177,6 @@ def build_rich_temporal_adj(num_frames, max_distance=3):
 
 
 # CHANGE THIS FOR EXPERIMENT WITH BASE VARIANT
-adj_temporal = build_rich_temporal_adj(
-                num_frames=243,
-                max_distance=3
-            ) 
 
 
 #spatial topology
@@ -267,30 +263,6 @@ class Skeleton:
 
 
 
-CONNECTIONS = {10: [9], 9: [8, 10], 8: [7, 9], 
-               14: [15, 8], 15: [16, 14], 
-               11: [12, 8], 12: [13, 11],
-               7: [0, 8], 0: [1, 7], 
-               1: [2, 0], 2: [3, 1], 
-               4: [5, 0], 5: [6, 4], 
-               16: [15], 13: [12], 
-               3: [2], 6: [5]}
-
-# build adj directly from this
-def build_adj_from_connections(connections, num_joints=17):
-    adj = torch.zeros(num_joints, num_joints)
-    for joint, neighbors in connections.items():
-        for neighbor in neighbors:
-            adj[joint, neighbor] = 1
-            adj[neighbor, joint] = 1  # symmetric
-    # self connections
-    adj = adj + torch.eye(num_joints)
-    # normalize rows
-    row_sum = adj.sum(dim=1, keepdim=True)
-    adj = adj / row_sum
-    return adj  # [17, 17]
-
-adj = build_adj_from_connections(CONNECTIONS, num_joints=17)
 
 def build_multiscale_adj(adj, num_hops=2):
     """
@@ -449,7 +421,7 @@ class MultiScaleKPA(nn.Module):
 
 
 class TPA(nn.Module):
-    def __init__(self, input_dim, output_dim, p_dropout=None, adj_temporal=adj_temporal):
+    def __init__(self, input_dim, output_dim, p_dropout=None, adj_temporal=None):
         super(TPA, self).__init__()
 
         self.gconv =  LearnableGraphConv(input_dim, output_dim, adj_temporal)
@@ -472,10 +444,12 @@ class TPA(nn.Module):
     
 
 class StackedTPA(nn.Module):
-    def __init__(self, input_dim, output_dim, hid_dim, p_dropout):
+    def __init__(self, input_dim, output_dim, hid_dim, p_dropout, adj_temporal=None):
         super().__init__()
-        self.gconv1 = TPA( input_dim, hid_dim, p_dropout)
-        self.gconv2 = TPA( hid_dim, output_dim, p_dropout)
+        
+
+        self.gconv1 = TPA( input_dim, hid_dim, p_dropout,adj_temporal)
+        self.gconv2 = TPA( hid_dim, output_dim, p_dropout,adj_temporal)
 
     def forward(self, x):
         residual = x
@@ -483,9 +457,34 @@ class StackedTPA(nn.Module):
         out = self.gconv2(out)
         return residual + out
 
+
+CONNECTIONS = {10: [9], 9: [8, 10], 8: [7, 9], 
+               14: [15, 8], 15: [16, 14], 
+               11: [12, 8], 12: [13, 11],
+               7: [0, 8], 0: [1, 7], 
+               1: [2, 0], 2: [3, 1], 
+               4: [5, 0], 5: [6, 4], 
+               16: [15], 13: [12], 
+               3: [2], 6: [5]}
+
+# build adj directly from this
+def build_adj_from_connections(connections, num_joints=17):
+    adj = torch.zeros(num_joints, num_joints)
+    for joint, neighbors in connections.items():
+        for neighbor in neighbors:
+            adj[joint, neighbor] = 1
+            adj[neighbor, joint] = 1  # symmetric
+    # self connections
+    adj = adj + torch.eye(num_joints)
+    # normalize rows
+    row_sum = adj.sum(dim=1, keepdim=True)
+    adj = adj / row_sum
+    return adj  # [17, 17]
+
+
 class Attention(nn.Module):
     def __init__(self, dim_in, dim_out, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.,
-                 mode='spatial'):
+                 mode='spatial',n_frames=243):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim_in // num_heads
@@ -498,19 +497,24 @@ class Attention(nn.Module):
 
         # only create what we need based on mode
         if self.mode == 'spatial':
-                      
+            adj = build_adj_from_connections(CONNECTIONS, num_joints=17)   
             self.kpa = MultiScaleKPA(
                             input_dim=dim_in, 
                             output_dim=dim_in,
-                            p_dropout=None)
+                            p_dropout=None,
+                            adj=adj)
         elif self.mode == 'temporal':
-            
+            adj_temporal = build_rich_temporal_adj(
+                            num_frames=n_frames, 
+                            max_distance=3
+                        )
             
             self.tpa = StackedTPA(
                 input_dim=dim_in,
                 output_dim=dim_in,
                 p_dropout=None,
-                hid_dim=dim_in             
+                hid_dim=dim_in,
+                adj_temporal=adj_temporal         
                 
             )
             # layer scale for TPA too

@@ -23,7 +23,7 @@ class AGFormerBlock(nn.Module):
         self.norm1 = nn.LayerNorm(dim)
         if mixer_type == 'attention':
             self.mixer = Attention(dim, dim, num_heads, qkv_bias, qk_scale, attn_drop,
-                                   proj_drop=drop, mode=mode)
+                                   proj_drop=drop, mode=mode,n_frames=n_frames)
         elif mixer_type == 'graph':
             self.mixer = GCN(dim, dim,
                              num_nodes=17 if mode == 'spatial' else n_frames,
