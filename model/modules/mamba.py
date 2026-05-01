@@ -117,8 +117,7 @@ class MambaMixer(nn.Module):
                  expand=2,
                  use_kpa=True,
                  use_tpa=False,
-                 dropout=0.0,
-                 dataset = "h36m"):
+                 dropout=0.0):
         super().__init__()
 
 
